@@ -1,0 +1,1487 @@
+from __future__ import annotations
+
+import argparse
+from pathlib import Path
+
+from comm_ls.backtest import run_score_backtest_from_paths
+from comm_ls.beta import (
+    DEFAULT_COMMODITY_BETA_RETURN_COLUMN,
+    DEFAULT_COMMODITY_BETA_SYMBOLS,
+    DEFAULT_PRIMARY_PROCESSED_BETA_VARIATION,
+    DEFAULT_PROCESSED_BETA_VARIATIONS,
+    build_equity_beta_returns_from_paths,
+    build_equity_processed_dataset_from_paths,
+)
+from comm_ls.candidates import build_candidate_signals_from_paths
+from comm_ls.commodity import build_commodity_signal_frame, load_carry_directory, write_frame
+from comm_ls.curve_diagnostics import build_matrix_curve_diagnostics_from_paths
+from comm_ls.equity import download_yfinance_prices
+from comm_ls.environment import commodity_environment_similarity_from_paths
+from comm_ls.discovery import (
+    audit_commodity_universe_from_paths,
+    build_commodity_sensitivity_matrix_from_paths,
+    build_daily_feature_return_cache_from_paths,
+    build_discovered_commodity_universe_from_paths,
+    classify_commodity_universe_tiers_from_paths,
+    write_quarterly_stock_feature_matrix_files_from_paths,
+)
+from comm_ls.feature_basket import (
+    build_feature_trade_candidates_from_paths,
+    run_feature_basket_backtest_from_paths,
+)
+from comm_ls.feature_matrix import build_stock_feature_matrix_cache_from_paths, build_stock_feature_matrix_from_paths
+from comm_ls.forecast import build_commodity_stock_forecast_study_from_paths
+from comm_ls.fundamentals import (
+    build_agriculture_fundamental_events_from_paths,
+    build_commodity_confirmation_events_from_paths,
+    build_fundamental_snapshot_from_paths,
+)
+from comm_ls.portfolio import (
+    build_long_index_hedge_weights,
+    build_long_short_weights,
+    load_scores,
+    load_shortability,
+    write_weights,
+)
+from comm_ls.precision import build_precision_event_candidates_from_paths
+from comm_ls.reaction import build_feature_reaction_study_from_paths
+from comm_ls.research_quality import (
+    audit_exposure_taxonomy_from_paths,
+    audit_forecast_from_paths,
+    audit_sensitivity_falsification_from_paths,
+    consolidate_candidate_signals_from_paths,
+    group_activation_scores_from_paths,
+    load_reviewed_features,
+    registry_turnover_from_paths,
+    review_candidate_taxonomy_from_paths,
+    reviewed_feature_list,
+)
+from comm_ls.shortability import build_shortability_from_price_directory
+from comm_ls.sensitivity import build_daily_scores_from_paths, build_stock_sensitivity_registry_from_paths
+from comm_ls.universe import (
+    build_broad_quarterly_liquidity_universe,
+    build_commodity_quarterly_universes,
+    build_quarterly_liquidity_universe,
+    get_exposure_universe,
+    load_seed_universe,
+    write_commodity_quarterly_universe_files,
+)
+
+
+DEFAULT_EXCLUDED_BROAD_UNIVERSE_TICKERS = ["SPY", "XLE", "XME", "GDX", "SIL", "XLU", "MOO", "LIT", "URA", "XHB"]
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog="comm-ls")
+    subparsers = parser.add_subparsers(dest="command", required=True)
+
+    commodity = subparsers.add_parser("build-commodity-signals")
+    commodity.add_argument("--input-dir", type=Path, default=Path("data/comm/carry_data"))
+    commodity.add_argument("--commodity-dir", type=Path, default=Path("data/comm"))
+    commodity.add_argument("--output", type=Path, default=Path("data/processed/commodity_signals.parquet"))
+
+    download = subparsers.add_parser("download-equities")
+    download.add_argument("--universe", type=Path, default=Path("config/us_commodity_equity_seed.csv"))
+    download.add_argument("--output-dir", type=Path, default=Path("data/equity/yfinance"))
+    download.add_argument("--start", default="2000-01-01")
+    download.add_argument("--end", default=None)
+    download.add_argument("--ticker", action="append", default=None)
+    download.add_argument("--limit", type=int, default=None)
+
+    quarterly = subparsers.add_parser("build-quarterly-universe")
+    quarterly.add_argument("--universe", type=Path, default=Path("config/us_commodity_equity_seed.csv"))
+    quarterly.add_argument("--prices-dir", type=Path, default=Path("data/equity/yfinance"))
+    quarterly.add_argument("--output", type=Path, default=Path("data/processed/quarterly_universe.csv"))
+    quarterly.add_argument("--min-price", type=float, default=5.0)
+    quarterly.add_argument("--min-adv", type=float, default=10_000_000.0)
+    quarterly.add_argument("--lookback-days", type=int, default=63)
+
+    commodity_quarterly = subparsers.add_parser("build-commodity-quarterly-universes")
+    commodity_quarterly.add_argument("--exposure-map", type=Path, default=Path("config/commodity_exposure_map.csv"))
+    commodity_quarterly.add_argument("--seed-universe", type=Path, default=Path("config/us_commodity_equity_seed.csv"))
+    commodity_quarterly.add_argument("--prices-dir", type=Path, default=Path("data/equity/yfinance"))
+    commodity_quarterly.add_argument("--commodity", action="append", default=None)
+    commodity_quarterly.add_argument("--start", default="2010-01-01")
+    commodity_quarterly.add_argument("--end", default=None)
+    commodity_quarterly.add_argument("--output-dir", type=Path, default=Path("data/universe"))
+    commodity_quarterly.add_argument(
+        "--combined-output",
+        type=Path,
+        default=Path("data/processed/cl_hg_quarterly_universe.csv"),
+    )
+    commodity_quarterly.add_argument("--min-price", type=float, default=5.0)
+    commodity_quarterly.add_argument("--min-adv", type=float, default=10_000_000.0)
+    commodity_quarterly.add_argument("--lookback-days", type=int, default=63)
+    commodity_quarterly.add_argument("--min-lookback-observations", type=int, default=42)
+    commodity_quarterly.add_argument("--min-history-observations", type=int, default=252)
+    commodity_quarterly.add_argument("--max-staleness-days", type=int, default=10)
+    commodity_quarterly.add_argument("--min-abs-prior-weight", type=float, default=0.0)
+
+    broad_quarterly = subparsers.add_parser("build-broad-quarterly-liquidity-universe")
+    broad_quarterly.add_argument("--prices-dir", type=Path, default=Path("data/equity/yfinance"))
+    broad_quarterly.add_argument("--seed-universe", type=Path, default=Path("config/us_commodity_equity_seed.csv"))
+    broad_quarterly.add_argument("--output", type=Path, default=Path("data/processed/broad_liquid_universe_quarterly.csv"))
+    broad_quarterly.add_argument("--start", default="2010-01-01")
+    broad_quarterly.add_argument("--end", default=None)
+    broad_quarterly.add_argument("--min-price", type=float, default=5.0)
+    broad_quarterly.add_argument("--min-adv", type=float, default=10_000_000.0)
+    broad_quarterly.add_argument("--lookback-days", type=int, default=63)
+    broad_quarterly.add_argument("--min-lookback-observations", type=int, default=42)
+    broad_quarterly.add_argument("--min-history-observations", type=int, default=252)
+    broad_quarterly.add_argument("--max-staleness-days", type=int, default=10)
+    broad_quarterly.add_argument("--exclude-ticker", action="append", default=None)
+
+    pseudo_russell = subparsers.add_parser("build-pseudo-russell1000-universe")
+    pseudo_russell.add_argument("--prices-dir", type=Path, default=Path("data/equity/yfinance"))
+    pseudo_russell.add_argument("--seed-universe", type=Path, default=Path("config/us_commodity_equity_seed.csv"))
+    pseudo_russell.add_argument(
+        "--output",
+        type=Path,
+        default=Path("data/processed/pseudo_russell1000_universe_quarterly.csv"),
+    )
+    pseudo_russell.add_argument("--start", default="2010-01-01")
+    pseudo_russell.add_argument("--end", default=None)
+    pseudo_russell.add_argument("--max-names", type=int, default=1000)
+    pseudo_russell.add_argument("--min-price", type=float, default=5.0)
+    pseudo_russell.add_argument("--min-adv", type=float, default=10_000_000.0)
+    pseudo_russell.add_argument("--lookback-days", type=int, default=63)
+    pseudo_russell.add_argument("--min-lookback-observations", type=int, default=42)
+    pseudo_russell.add_argument("--min-history-observations", type=int, default=252)
+    pseudo_russell.add_argument("--max-staleness-days", type=int, default=10)
+    pseudo_russell.add_argument("--exclude-ticker", action="append", default=None)
+
+    sensitivity_matrix = subparsers.add_parser("build-commodity-sensitivity-matrix")
+    sensitivity_matrix.add_argument("--commodity", required=True)
+    sensitivity_matrix.add_argument("--commodity-signals", type=Path, default=Path("data/processed/commodity_signals.parquet"))
+    sensitivity_matrix.add_argument("--beta-returns", type=Path, default=Path("data/processed/equity_beta_returns.parquet"))
+    sensitivity_matrix.add_argument(
+        "--broad-universe",
+        type=Path,
+        default=Path("data/processed/broad_liquid_universe_quarterly.csv"),
+    )
+    sensitivity_matrix.add_argument("--output", type=Path, default=None)
+    sensitivity_matrix.add_argument("--feature", action="append", default=None)
+    sensitivity_matrix.add_argument(
+        "--feature-preset",
+        choices=["priority", "curve_shock_vol", "broad"],
+        default="priority",
+    )
+    sensitivity_matrix.add_argument("--horizon", action="append", type=int, default=None)
+    sensitivity_matrix.add_argument("--sample-years", action="append", type=int, default=None)
+    sensitivity_matrix.add_argument("--start", default=None)
+    sensitivity_matrix.add_argument("--end", default=None)
+    sensitivity_matrix.add_argument("--feature-z-window", type=int, default=252)
+    sensitivity_matrix.add_argument("--min-feature-observations", type=int, default=126)
+    sensitivity_matrix.add_argument("--min-observations", type=int, default=126)
+    sensitivity_matrix.add_argument("--include-prestandardized", action="store_true")
+
+    feature_return_cache = subparsers.add_parser("build-daily-feature-return-cache")
+    feature_return_cache.add_argument("--commodity", required=True)
+    feature_return_cache.add_argument("--commodity-signals", type=Path, default=Path("data/processed/commodity_signals.parquet"))
+    feature_return_cache.add_argument("--beta-returns", type=Path, default=Path("data/processed/equity_beta_returns.parquet"))
+    feature_return_cache.add_argument("--output", type=Path, default=None)
+    feature_return_cache.add_argument("--feature", action="append", default=None)
+    feature_return_cache.add_argument(
+        "--feature-preset",
+        choices=["priority", "curve_shock_vol", "broad"],
+        default="priority",
+    )
+    feature_return_cache.add_argument("--horizon", action="append", type=int, default=None)
+    feature_return_cache.add_argument("--feature-z-window", type=int, default=252)
+    feature_return_cache.add_argument("--min-feature-observations", type=int, default=126)
+    feature_return_cache.add_argument("--min-observations", type=int, default=126)
+    feature_return_cache.add_argument("--include-prestandardized", action="store_true")
+
+    quarterly_matrix = subparsers.add_parser("build-quarterly-stock-feature-matrix")
+    quarterly_matrix.add_argument("--commodity", required=True)
+    quarterly_matrix.add_argument("--cache", type=Path, default=None)
+    quarterly_matrix.add_argument(
+        "--broad-universe",
+        type=Path,
+        default=Path("data/processed/pseudo_russell1000_universe_quarterly.csv"),
+    )
+    quarterly_matrix.add_argument("--output-dir", type=Path, default=None)
+    quarterly_matrix.add_argument("--manifest", type=Path, default=None)
+    quarterly_matrix.add_argument("--lookback-years", action="append", type=int, default=None)
+    quarterly_matrix.add_argument("--horizon", action="append", type=int, default=None)
+    quarterly_matrix.add_argument("--start", default=None)
+    quarterly_matrix.add_argument("--end", default=None)
+    quarterly_matrix.add_argument("--min-observations", type=int, default=126)
+
+    tiers = subparsers.add_parser("classify-commodity-universe-tiers")
+    tiers.add_argument("--commodity", required=True)
+    tiers.add_argument("--sensitivity-matrix", type=Path, default=None)
+    tiers.add_argument("--broad-universe", type=Path, default=Path("data/processed/broad_liquid_universe_quarterly.csv"))
+    tiers.add_argument("--exposure-map", type=Path, default=Path("config/commodity_exposure_map.csv"))
+    tiers.add_argument("--beta-returns", type=Path, default=Path("data/processed/equity_beta_returns.parquet"))
+    tiers.add_argument("--output", type=Path, default=None)
+    tiers.add_argument("--min-abs-t", type=float, default=2.0)
+    tiers.add_argument("--anchor-corr-lookback-days", type=int, default=252)
+
+    discovered_universe = subparsers.add_parser("build-discovered-commodity-universe")
+    discovered_universe.add_argument("--commodity", required=True)
+    discovered_universe.add_argument("--tiers", type=Path, default=None)
+    discovered_universe.add_argument("--output", type=Path, default=None)
+    discovered_universe.add_argument("--output-dir", type=Path, default=Path("data/universe_discovered"))
+    discovered_universe.add_argument("--max-names", type=int, default=60)
+    discovered_universe.add_argument("--max-anchor-share", type=float, default=0.25)
+    discovered_universe.add_argument("--min-second-order", type=int, default=10)
+    discovered_universe.add_argument("--min-discovery-score", type=float, default=0.0)
+
+    universe_audit = subparsers.add_parser("audit-commodity-universe")
+    universe_audit.add_argument("--commodity", required=True)
+    universe_audit.add_argument("--quarter", required=True)
+    universe_audit.add_argument("--tiers", type=Path, default=None)
+    universe_audit.add_argument("--selected-universe", type=Path, default=None)
+    universe_audit.add_argument("--output", type=Path, default=None)
+    universe_audit.add_argument("--max-rejected", type=int, default=100)
+
+    shortability = subparsers.add_parser("build-shortability")
+    shortability.add_argument("--prices-dir", type=Path, default=Path("data/equity/yfinance"))
+    shortability.add_argument("--output", type=Path, default=Path("data/processed/shortability.parquet"))
+    shortability.add_argument("--min-price", type=float, default=5.0)
+    shortability.add_argument("--min-adv", type=float, default=10_000_000.0)
+    shortability.add_argument("--lookback-days", type=int, default=63)
+
+    portfolio = subparsers.add_parser("build-portfolio-weights")
+    portfolio.add_argument("--scores", type=Path, required=True)
+    portfolio.add_argument("--output", type=Path, default=Path("data/processed/portfolio_weights.csv"))
+    portfolio.add_argument("--mode", choices=["long-short", "index-hedge"], default="index-hedge")
+    portfolio.add_argument("--shortability", type=Path, default=None)
+    portfolio.add_argument("--long-count", type=int, default=20)
+    portfolio.add_argument("--short-count", type=int, default=20)
+    portfolio.add_argument("--gross-long", type=float, default=1.0)
+    portfolio.add_argument("--gross-short", type=float, default=1.0)
+    portfolio.add_argument("--hedge-symbol", default="SPY")
+    portfolio.add_argument("--hedge-weight", type=float, default=-1.0)
+    portfolio.add_argument("--shortability-max-staleness-days", type=int, default=5)
+
+    backtest = subparsers.add_parser("run-backtest")
+    backtest.add_argument("--scores", type=Path, required=True)
+    backtest.add_argument("--prices-dir", type=Path, default=Path("data/equity/yfinance"))
+    backtest.add_argument("--output-daily", type=Path, default=Path("data/processed/backtest_daily.csv"))
+    backtest.add_argument("--output-weights", type=Path, default=Path("data/processed/backtest_weights.csv"))
+    backtest.add_argument("--output-summary", type=Path, default=Path("data/processed/backtest_summary.csv"))
+    backtest.add_argument("--mode", choices=["long-short", "index-hedge"], default="index-hedge")
+    backtest.add_argument("--shortability", type=Path, default=None)
+    backtest.add_argument("--long-count", type=int, default=20)
+    backtest.add_argument("--short-count", type=int, default=20)
+    backtest.add_argument("--gross-long", type=float, default=1.0)
+    backtest.add_argument("--gross-short", type=float, default=1.0)
+    backtest.add_argument("--hedge-symbol", default="SPY")
+    backtest.add_argument("--hedge-weight", type=float, default=-1.0)
+    backtest.add_argument("--hold-days", type=int, default=21)
+    backtest.add_argument("--execution-lag-days", type=int, default=1)
+    backtest.add_argument("--transaction-cost-bps", type=float, default=0.0)
+    backtest.add_argument("--capital-per-sleeve", type=float, default=None)
+    backtest.add_argument("--shortability-max-staleness-days", type=int, default=5)
+
+    reactions = subparsers.add_parser("study-feature-reactions")
+    reactions.add_argument(
+        "--commodity-signals",
+        type=Path,
+        default=Path("data/processed/commodity_signals.parquet"),
+    )
+    reactions.add_argument("--prices-dir", type=Path, default=Path("data/equity/yfinance"))
+    reactions.add_argument(
+        "--quarterly-universe",
+        type=Path,
+        default=Path("data/processed/quarterly_universe.csv"),
+    )
+    reactions.add_argument("--output", type=Path, default=Path("data/processed/feature_reactions.csv"))
+    reactions.add_argument("--feature", action="append", default=None)
+    reactions.add_argument("--horizon", action="append", type=int, default=None)
+    reactions.add_argument("--as-of-date", default=None)
+    reactions.add_argument("--lookback-years", type=float, default=3.0)
+    reactions.add_argument("--shock-z-threshold", type=float, default=1.0)
+    reactions.add_argument("--feature-z-window", type=int, default=252)
+    reactions.add_argument("--min-feature-observations", type=int, default=126)
+    reactions.add_argument("--min-events", type=int, default=8)
+    reactions.add_argument("--adjust-market", default=None)
+    reactions.add_argument("--non-overlap-events", action="store_true")
+    reactions.add_argument("--residualize", action="store_true")
+    reactions.add_argument("--residual-market", default="SPY")
+    reactions.add_argument("--sector-map", type=Path, default=Path("config/theme_sector_hedges.csv"))
+    reactions.add_argument("--beta-lookback-days", type=int, default=252)
+    reactions.add_argument("--min-beta-observations", type=int, default=126)
+
+    candidates = subparsers.add_parser("build-candidate-signals")
+    candidates.add_argument("--reactions", type=Path, default=Path("data/processed/feature_reactions.csv"))
+    candidates.add_argument("--universe", type=Path, default=Path("config/us_commodity_equity_seed.csv"))
+    candidates.add_argument("--output", type=Path, default=Path("data/processed/candidate_signals.csv"))
+    candidates.add_argument("--min-events", type=int, default=30)
+    candidates.add_argument("--min-abs-t", type=float, default=3.0)
+    candidates.add_argument("--min-same-direction-horizons", type=int, default=2)
+
+    registry = subparsers.add_parser("build-sensitivity-registry")
+    registry.add_argument("--reactions", type=Path, default=Path("data/processed/feature_reactions.csv"))
+    registry.add_argument("--universe", type=Path, default=Path("config/us_commodity_equity_seed.csv"))
+    registry.add_argument("--output", type=Path, default=Path("data/processed/stock_sensitivity_registry.csv"))
+    registry.add_argument("--min-events", type=int, default=30)
+    registry.add_argument("--min-abs-t", type=float, default=3.0)
+    registry.add_argument("--min-same-direction-horizons", type=int, default=2)
+
+    scores = subparsers.add_parser("build-daily-scores")
+    scores.add_argument("--registry", type=Path, default=Path("data/processed/stock_sensitivity_registry.csv"))
+    scores.add_argument(
+        "--commodity-signals",
+        type=Path,
+        default=Path("data/processed/commodity_signals.parquet"),
+    )
+    scores.add_argument("--output", type=Path, default=Path("data/processed/daily_scores.csv"))
+    scores.add_argument("--as-of-date", required=True)
+    scores.add_argument("--feature-z-window", type=int, default=252)
+    scores.add_argument("--min-feature-observations", type=int, default=126)
+
+    beta = subparsers.add_parser("build-equity-beta-returns")
+    beta.add_argument("--prices-dir", type=Path, default=Path("data/equity/yfinance"))
+    beta.add_argument("--universe", type=Path, default=Path("config/us_commodity_equity_seed.csv"))
+    beta.add_argument("--theme-hedges", type=Path, default=Path("config/theme_sector_hedges.csv"))
+    beta.add_argument("--output", type=Path, default=Path("data/processed/equity_beta_returns.parquet"))
+    beta.add_argument("--market-ticker", default="SPY")
+    beta.add_argument("--beta-lookback-days", type=int, default=252)
+    beta.add_argument("--beta-lookback-months", type=int, default=12)
+    beta.add_argument("--min-beta-observations", type=int, default=26)
+    beta.add_argument("--beta-lag-days", type=int, default=1)
+    beta.add_argument("--beta-return-frequency", choices=["daily", "weekly"], default="weekly")
+    beta.add_argument("--beta-update-frequency", choices=["daily", "monthly"], default="monthly")
+    beta.add_argument("--beta-weighting", choices=["equal", "exponential"], default="exponential")
+    beta.add_argument("--beta-half-life-months", type=float, default=3.0)
+    beta.add_argument("--beta-smoothing", type=float, default=0.0)
+    beta.add_argument("--hedge-ratio-scale", type=float, default=1.0)
+
+    equity_processed = subparsers.add_parser("build-equity-processed-dataset")
+    equity_processed.add_argument("--prices-dir", type=Path, default=Path("data/equity/yfinance"))
+    equity_processed.add_argument("--universe", type=Path, default=Path("config/us_commodity_equity_seed.csv"))
+    equity_processed.add_argument("--theme-hedges", type=Path, default=Path("config/theme_sector_hedges.csv"))
+    equity_processed.add_argument("--output", type=Path, default=Path("data/processed/equity_processed.parquet"))
+    equity_processed.add_argument("--commodity-signals", type=Path, default=Path("data/processed/commodity_signals.parquet"))
+    equity_processed.add_argument("--exposure-map", type=Path, default=Path("config/commodity_exposure_map.csv"))
+    equity_processed.add_argument("--market-ticker", default="SPY")
+    equity_processed.add_argument("--start", default="2010-01-01")
+    equity_processed.add_argument("--end", default=None)
+    equity_processed.add_argument(
+        "--beta-variation",
+        action="append",
+        choices=sorted(DEFAULT_PROCESSED_BETA_VARIATIONS),
+        default=None,
+    )
+    equity_processed.add_argument(
+        "--primary-variation",
+        choices=sorted(DEFAULT_PROCESSED_BETA_VARIATIONS),
+        default=DEFAULT_PRIMARY_PROCESSED_BETA_VARIATION,
+    )
+    equity_processed.add_argument("--beta-lag-days", type=int, default=1)
+    equity_processed.add_argument("--commodity-beta-symbol", action="append", default=None)
+    equity_processed.add_argument("--commodity-return-column", default=DEFAULT_COMMODITY_BETA_RETURN_COLUMN)
+    equity_processed.add_argument("--skip-commodity-beta-residuals", action="store_true")
+
+    forecast = subparsers.add_parser("study-commodity-forecast")
+    forecast.add_argument("--commodity-signals", type=Path, default=Path("data/processed/commodity_signals.parquet"))
+    forecast.add_argument("--beta-returns", type=Path, default=Path("data/processed/equity_beta_returns.parquet"))
+    forecast.add_argument("--universe", type=Path, default=Path("config/us_commodity_equity_seed.csv"))
+    forecast.add_argument("--output", type=Path, required=True)
+    forecast.add_argument("--commodity", required=True)
+    forecast.add_argument("--ticker", action="append", default=None)
+    forecast.add_argument("--theme", default=None)
+    forecast.add_argument("--feature", action="append", default=None)
+    forecast.add_argument("--horizon", action="append", type=int, default=None)
+    forecast.add_argument("--sample-years", action="append", type=int, default=None)
+    forecast.add_argument("--feature-z-window", type=int, default=252)
+    forecast.add_argument("--min-feature-observations", type=int, default=126)
+    forecast.add_argument("--min-observations", type=int, default=126)
+    forecast.add_argument("--include-prestandardized", action="store_true")
+    forecast.add_argument("--include-annual", action="store_true")
+
+    exposure = subparsers.add_parser("list-exposure-universe")
+    exposure.add_argument("--exposure-map", type=Path, default=Path("config/commodity_exposure_map.csv"))
+    exposure.add_argument("--commodity", default=None)
+    exposure.add_argument("--min-abs-prior-weight", type=float, default=0.0)
+    exposure.add_argument("--output", type=Path, default=None)
+
+    reviewed = subparsers.add_parser("list-reviewed-features")
+    reviewed.add_argument("--reviewed-features", type=Path, default=Path("config/reviewed_commodity_features.csv"))
+    reviewed.add_argument("--commodity", default=None)
+    reviewed.add_argument("--family", default=None)
+    reviewed.add_argument("--enabled-only", action="store_true")
+    reviewed.add_argument("--output", type=Path, default=None)
+
+    audit = subparsers.add_parser("audit-forecast-signals")
+    audit.add_argument("--forecast", action="append", type=Path, required=True)
+    audit.add_argument("--exposure-map", type=Path, default=Path("config/commodity_exposure_map.csv"))
+    audit.add_argument("--reviewed-features", type=Path, default=Path("config/reviewed_commodity_features.csv"))
+    audit.add_argument("--output", type=Path, default=Path("data/processed/forecast_signal_audit.csv"))
+    audit.add_argument("--aggregate-sample", default=None)
+    audit.add_argument("--high-abs-t", type=float, default=8.0)
+    audit.add_argument("--min-same-direction-share", type=float, default=0.6)
+    audit.add_argument("--min-peer-direction-share", type=float, default=0.6)
+
+    falsification = subparsers.add_parser("audit-sensitivity-falsification")
+    falsification.add_argument("--matrix", type=Path, required=True)
+    falsification.add_argument("--exposure-map", type=Path, default=Path("config/commodity_exposure_map.csv"))
+    falsification.add_argument("--output", type=Path, default=Path("data/processed/sensitivity_falsification_audit.csv"))
+    falsification.add_argument("--min-abs-t", type=float, default=2.0)
+    falsification.add_argument("--min-nonoverlap-abs-t", type=float, default=1.0)
+    falsification.add_argument("--min-effective-observations", type=int, default=20)
+    falsification.add_argument("--max-overlap-inflation", type=float, default=3.0)
+    falsification.add_argument("--min-hit-rate-edge", type=float, default=0.03)
+
+    taxonomy_audit = subparsers.add_parser("audit-exposure-taxonomy")
+    taxonomy_audit.add_argument("--exposure-map", type=Path, default=Path("config/commodity_exposure_map.csv"))
+    taxonomy_audit.add_argument("--role-taxonomy", type=Path, default=Path("config/commodity_role_taxonomy.csv"))
+    taxonomy_audit.add_argument("--candidates", type=Path, default=None)
+    taxonomy_audit.add_argument("--output", type=Path, default=Path("data/processed/exposure_taxonomy_audit.csv"))
+    taxonomy_audit.add_argument(
+        "--unmapped-output",
+        type=Path,
+        default=Path("data/processed/exposure_taxonomy_unmapped_candidates.csv"),
+    )
+
+    candidate_taxonomy = subparsers.add_parser("review-candidate-taxonomy")
+    candidate_taxonomy.add_argument("--candidates", type=Path, required=True)
+    candidate_taxonomy.add_argument("--exposure-map", type=Path, default=Path("config/commodity_exposure_map.csv"))
+    candidate_taxonomy.add_argument("--role-taxonomy", type=Path, default=Path("config/commodity_role_taxonomy.csv"))
+    candidate_taxonomy.add_argument("--output", type=Path, default=Path("data/processed/candidate_taxonomy_review.csv"))
+
+    turnover = subparsers.add_parser("study-registry-turnover")
+    turnover.add_argument("--registry", action="append", type=Path, default=None)
+    turnover.add_argument("--reactions", type=Path, default=None)
+    turnover.add_argument("--universe", type=Path, default=Path("config/us_commodity_equity_seed.csv"))
+    turnover.add_argument("--output", type=Path, default=Path("data/processed/registry_turnover_summary.csv"))
+    turnover.add_argument("--detail-output", type=Path, default=Path("data/processed/registry_turnover_detail.csv"))
+    turnover.add_argument("--min-events", type=int, default=30)
+    turnover.add_argument("--min-abs-t", type=float, default=3.0)
+    turnover.add_argument("--min-same-direction-horizons", type=int, default=2)
+
+    group_scores = subparsers.add_parser("build-group-activation-scores")
+    group_scores.add_argument("--registry", type=Path, default=Path("data/processed/stock_sensitivity_registry.csv"))
+    group_scores.add_argument(
+        "--commodity-signals",
+        type=Path,
+        default=Path("data/processed/commodity_signals.parquet"),
+    )
+    group_scores.add_argument("--exposure-map", type=Path, default=Path("config/commodity_exposure_map.csv"))
+    group_scores.add_argument("--output", type=Path, default=Path("data/processed/group_activation_scores.csv"))
+    group_scores.add_argument("--as-of-date", required=True)
+    group_scores.add_argument("--activation-z", type=float, default=1.0)
+    group_scores.add_argument("--feature-z-window", type=int, default=252)
+    group_scores.add_argument("--min-feature-observations", type=int, default=126)
+    group_scores.add_argument("--allow-unmapped", action="store_true")
+
+    consolidate = subparsers.add_parser("consolidate-candidate-signals")
+    consolidate.add_argument("--candidates", type=Path, default=Path("data/processed/candidate_signals.csv"))
+    consolidate.add_argument("--forecast-audit", type=Path, default=Path("data/processed/forecast_signal_audit.csv"))
+    consolidate.add_argument("--reviewed-features", type=Path, default=Path("config/reviewed_commodity_features.csv"))
+    consolidate.add_argument("--output", type=Path, default=Path("data/processed/consolidated_candidate_signals.csv"))
+    consolidate.add_argument("--min-confidence", choices=["low", "medium", "high"], default="medium")
+    consolidate.add_argument("--require-audit-candidate", action="store_true")
+    consolidate.add_argument("--min-same-direction-share", type=float, default=0.6)
+    consolidate.add_argument("--min-peer-direction-share", type=float, default=0.0)
+    consolidate.add_argument("--max-per-ticker", type=int, default=3)
+
+    matrix = subparsers.add_parser("build-stock-feature-matrix")
+    matrix.add_argument(
+        "--signals",
+        type=Path,
+        default=Path("data/processed/consolidated_candidate_signals.csv"),
+    )
+    matrix.add_argument("--output", type=Path, default=Path("data/processed/stock_feature_matrix.csv"))
+    matrix.add_argument("--source", default="consolidated_candidate_signals")
+
+    matrix_cache = subparsers.add_parser("build-stock-feature-matrix-cache")
+    matrix_cache.add_argument("--reactions", type=Path, default=Path("data/processed/feature_reactions.csv"))
+    matrix_cache.add_argument("--universe", type=Path, default=Path("config/us_commodity_equity_seed.csv"))
+    matrix_cache.add_argument("--forecast-audit", type=Path, default=Path("data/processed/forecast_signal_audit.csv"))
+    matrix_cache.add_argument("--reviewed-features", type=Path, default=Path("config/reviewed_commodity_features.csv"))
+    matrix_cache.add_argument("--output", type=Path, default=Path("data/processed/stock_feature_matrix_cache.parquet"))
+    matrix_cache.add_argument("--min-events", type=int, default=30)
+    matrix_cache.add_argument("--min-abs-t", type=float, default=3.0)
+    matrix_cache.add_argument("--min-same-direction-horizons", type=int, default=2)
+    matrix_cache.add_argument("--min-confidence", choices=["low", "medium", "high"], default="medium")
+    matrix_cache.add_argument("--require-audit-candidate", action="store_true")
+    matrix_cache.add_argument("--min-same-direction-share", type=float, default=0.6)
+    matrix_cache.add_argument("--min-peer-direction-share", type=float, default=0.0)
+    matrix_cache.add_argument("--max-per-ticker", type=int, default=3)
+    matrix_cache.add_argument("--source", default="rolling_feature_reactions")
+
+    diagnostics = subparsers.add_parser("build-stock-feature-curve-diagnostics")
+    diagnostics.add_argument(
+        "--matrix",
+        type=Path,
+        default=Path("data/processed/stock_feature_matrix_cache.parquet"),
+    )
+    diagnostics.add_argument("--as-of-date", required=True)
+    diagnostics.add_argument(
+        "--output-annual",
+        type=Path,
+        default=Path("data/processed/stock_feature_curve_annual.csv"),
+    )
+    diagnostics.add_argument(
+        "--output-regime",
+        type=Path,
+        default=Path("data/processed/stock_feature_curve_regime.csv"),
+    )
+    diagnostics.add_argument(
+        "--output-time-regime",
+        type=Path,
+        default=Path("data/processed/stock_feature_curve_time_regime.csv"),
+    )
+    diagnostics.add_argument(
+        "--output-summary",
+        type=Path,
+        default=Path("data/processed/stock_feature_curve_stability_summary.csv"),
+    )
+    diagnostics.add_argument("--ticker", default=None)
+    diagnostics.add_argument("--commodity", default=None)
+    diagnostics.add_argument("--feature", default=None)
+    diagnostics.add_argument("--start", default="2016-01-01")
+    diagnostics.add_argument("--end", default=None)
+    diagnostics.add_argument("--return-column", default="residual_return")
+    diagnostics.add_argument("--activation-z", type=float, default=1.0)
+    diagnostics.add_argument("--position-mode", choices=["sign", "continuous"], default="sign")
+    diagnostics.add_argument("--transaction-cost-bps", type=float, default=0.0)
+
+    env = subparsers.add_parser("classify-commodity-environment")
+    env.add_argument("--symbol", required=True)
+    env.add_argument(
+        "--commodity-signals",
+        type=Path,
+        default=Path("data/processed/commodity_signals.parquet"),
+    )
+    env.add_argument("--as-of-date", default=None)
+    env.add_argument("--start", default="2010-01-01")
+    env.add_argument("--current-window-days", type=int, default=63)
+    env.add_argument("--feature", action="append", default=None)
+    env.add_argument("--min-regime-observations", type=int, default=126)
+    env.add_argument(
+        "--output-summary",
+        type=Path,
+        default=Path("data/processed/commodity_environment_similarity.csv"),
+    )
+    env.add_argument(
+        "--output-detail",
+        type=Path,
+        default=Path("data/processed/commodity_environment_similarity_detail.csv"),
+    )
+
+    feature_candidates = subparsers.add_parser("build-feature-trade-candidates")
+    feature_candidates.add_argument(
+        "--matrix",
+        type=Path,
+        default=Path("data/processed/stock_feature_matrix_cache_curve_loose.parquet"),
+    )
+    feature_candidates.add_argument("--as-of-date", required=True)
+    feature_candidates.add_argument(
+        "--commodity-signals",
+        type=Path,
+        default=Path("data/processed/commodity_signals.parquet"),
+    )
+    feature_candidates.add_argument(
+        "--stability-summary",
+        action="append",
+        type=Path,
+        default=None,
+    )
+    feature_candidates.add_argument("--commodity", action="append", default=None)
+    feature_candidates.add_argument("--theme", action="append", default=None)
+    feature_candidates.add_argument("--environment-start", default="2010-01-01")
+    feature_candidates.add_argument("--environment-window-days", type=int, default=63)
+    feature_candidates.add_argument("--max-per-commodity", type=int, default=12)
+    feature_candidates.add_argument("--max-per-theme", type=int, default=4)
+    feature_candidates.add_argument("--min-post-covid-active-median-return", type=float, default=0.0)
+    feature_candidates.add_argument(
+        "--output",
+        type=Path,
+        default=Path("data/processed/feature_trade_candidates.csv"),
+    )
+
+    feature_basket = subparsers.add_parser("run-feature-basket-backtest")
+    feature_basket.add_argument("--candidates", type=Path, required=True)
+    feature_basket.add_argument(
+        "--matrix",
+        type=Path,
+        default=Path("data/processed/stock_feature_matrix_cache_curve_loose.parquet"),
+    )
+    feature_basket.add_argument("--as-of-date", required=True)
+    feature_basket.add_argument(
+        "--commodity-signals",
+        type=Path,
+        default=Path("data/processed/commodity_signals.parquet"),
+    )
+    feature_basket.add_argument(
+        "--beta-returns",
+        type=Path,
+        default=Path("data/processed/equity_beta_returns.parquet"),
+    )
+    feature_basket.add_argument("--start", default="2010-01-01")
+    feature_basket.add_argument("--end", default=None)
+    feature_basket.add_argument("--return-column", default="residual_return")
+    feature_basket.add_argument("--activation-z", type=float, default=1.0)
+    feature_basket.add_argument("--exit-z", type=float, default=None)
+    feature_basket.add_argument("--position-mode", choices=["sign", "continuous"], default="sign")
+    feature_basket.add_argument("--transaction-cost-bps", type=float, default=10.0)
+    feature_basket.add_argument("--max-pair-weight", type=float, default=0.12)
+    feature_basket.add_argument("--target-gross", type=float, default=1.0)
+    feature_basket.add_argument("--rebalance-frequency", choices=["daily", "weekly", "monthly"], default="daily")
+    feature_basket.add_argument("--include-ineligible", action="store_true")
+    feature_basket.add_argument("--label", default="feature_basket")
+    feature_basket.add_argument(
+        "--output-daily",
+        type=Path,
+        default=Path("data/processed/feature_basket_daily.csv"),
+    )
+    feature_basket.add_argument(
+        "--output-weights",
+        type=Path,
+        default=Path("data/processed/feature_basket_weights.csv"),
+    )
+    feature_basket.add_argument(
+        "--output-summary",
+        type=Path,
+        default=Path("data/processed/feature_basket_summary.csv"),
+    )
+
+    precision_candidates = subparsers.add_parser("build-precision-event-candidates")
+    precision_candidates.add_argument("--candidates", type=Path, required=True)
+    precision_candidates.add_argument("--as-of-date", required=True)
+    precision_candidates.add_argument(
+        "--commodity-signals",
+        type=Path,
+        default=Path("data/processed/commodity_signals.parquet"),
+    )
+    precision_candidates.add_argument("--exposure-map", type=Path, default=Path("config/commodity_exposure_map.csv"))
+    precision_candidates.add_argument(
+        "--role-taxonomy",
+        type=Path,
+        default=Path("config/commodity_role_taxonomy.csv"),
+    )
+    precision_candidates.add_argument("--falsification-audit", type=Path, default=None)
+    precision_candidates.add_argument("--shortability", type=Path, default=None)
+    precision_candidates.add_argument("--no-require-trigger", action="store_true")
+    precision_candidates.add_argument("--allow-low-priority-roles", action="store_true")
+    precision_candidates.add_argument("--max-names", type=int, default=None)
+    precision_candidates.add_argument(
+        "--output",
+        type=Path,
+        default=Path("data/processed/precision_event_candidates.csv"),
+    )
+
+    fundamentals = subparsers.add_parser("build-fundamental-snapshot")
+    fundamentals.add_argument(
+        "--openbb-metrics",
+        type=Path,
+        default=Path("data/external/port_research/openbb_equity_fundamental_metrics.csv"),
+    )
+    fundamentals.add_argument(
+        "--edgar-factors",
+        type=Path,
+        default=Path("data/external/port_research/edgar_factors.csv"),
+    )
+    fundamentals.add_argument("--exposure-map", type=Path, default=Path("config/commodity_exposure_map.csv"))
+    fundamentals.add_argument("--role-taxonomy", type=Path, default=Path("config/commodity_role_taxonomy.csv"))
+    fundamentals.add_argument(
+        "--output-snapshot",
+        type=Path,
+        default=Path("data/processed/fundamental_snapshot.csv"),
+    )
+    fundamentals.add_argument(
+        "--output-factors",
+        type=Path,
+        default=Path("data/processed/fundamental_factors.csv"),
+    )
+    fundamentals.add_argument("--min-market-cap", type=float, default=500_000_000.0)
+
+    ag_fundamentals = subparsers.add_parser("build-agriculture-fundamental-events")
+    ag_fundamentals.add_argument(
+        "--nass-factors",
+        type=Path,
+        default=Path("data/external/port_research/nass_factors.csv"),
+    )
+    ag_fundamentals.add_argument(
+        "--usda-report-factors",
+        type=Path,
+        default=Path("data/external/port_research/usda_report_factors.csv"),
+    )
+    ag_fundamentals.add_argument(
+        "--output",
+        type=Path,
+        default=Path("data/processed/agriculture_fundamental_events.csv"),
+    )
+    ag_fundamentals.add_argument("--usda-tradable-hour-utc", type=int, default=18)
+
+    commodity_confirmation = subparsers.add_parser("build-commodity-confirmation-events")
+    commodity_confirmation.add_argument("--commodity", default="CL")
+    commodity_confirmation.add_argument(
+        "--eia-factors",
+        type=Path,
+        default=Path("data/external/port_research/eia_factors.csv"),
+    )
+    commodity_confirmation.add_argument(
+        "--cftc-factors",
+        type=Path,
+        default=Path("data/external/port_research/cftc_factors.csv"),
+    )
+    commodity_confirmation.add_argument(
+        "--output",
+        type=Path,
+        default=Path("data/processed/cl_commodity_confirmation_events.csv"),
+    )
+    commodity_confirmation.add_argument("--eia-tradable-lag-days", type=int, default=1)
+    commodity_confirmation.add_argument("--cftc-tradable-lag-days", type=int, default=3)
+
+    return parser
+
+
+def main() -> None:
+    parser = build_parser()
+    args = parser.parse_args()
+
+    if args.command == "build-commodity-signals":
+        carry = load_carry_directory(args.input_dir)
+        signals = build_commodity_signal_frame(carry, commodity_dir=args.commodity_dir)
+        write_frame(signals, args.output)
+        print(f"Wrote {len(signals):,} commodity signal rows to {args.output}")
+        return
+
+    if args.command == "download-equities":
+        seed = load_seed_universe(args.universe)
+        if args.ticker:
+            tickers = [ticker.upper() for ticker in args.ticker]
+        else:
+            tickers = seed["ticker"].tolist()
+        if args.limit is not None:
+            tickers = tickers[: args.limit]
+        paths = download_yfinance_prices(
+            tickers,
+            output_dir=args.output_dir,
+            start=args.start,
+            end=args.end,
+        )
+        print(f"Wrote {len(paths):,} yfinance price files to {args.output_dir}")
+        return
+
+    if args.command == "build-quarterly-universe":
+        quarterly = build_quarterly_liquidity_universe(
+            seed_path=args.universe,
+            prices_dir=args.prices_dir,
+            min_price=args.min_price,
+            min_adv=args.min_adv,
+            lookback_days=args.lookback_days,
+        )
+        args.output.parent.mkdir(parents=True, exist_ok=True)
+        quarterly.to_csv(args.output, index=False)
+        print(f"Wrote {len(quarterly):,} quarterly universe rows to {args.output}")
+        return
+
+    if args.command == "build-commodity-quarterly-universes":
+        commodities = args.commodity or ["CL", "HG"]
+        universe = build_commodity_quarterly_universes(
+            exposure_map_path=args.exposure_map,
+            seed_path=args.seed_universe,
+            prices_dir=args.prices_dir,
+            commodities=commodities,
+            start=args.start,
+            end=args.end,
+            min_price=args.min_price,
+            min_adv=args.min_adv,
+            lookback_days=args.lookback_days,
+            min_lookback_observations=args.min_lookback_observations,
+            min_history_observations=args.min_history_observations,
+            max_staleness_days=args.max_staleness_days,
+            min_abs_prior_weight=args.min_abs_prior_weight,
+        )
+        args.combined_output.parent.mkdir(parents=True, exist_ok=True)
+        universe.to_csv(args.combined_output, index=False)
+        paths = write_commodity_quarterly_universe_files(universe, args.output_dir)
+        print(
+            f"Wrote {len(universe):,} commodity-quarter universe rows to {args.combined_output} "
+            f"and {len(paths):,} files under {args.output_dir}"
+        )
+        return
+
+    if args.command == "build-broad-quarterly-liquidity-universe":
+        exclude_tickers = args.exclude_ticker or DEFAULT_EXCLUDED_BROAD_UNIVERSE_TICKERS
+        universe = build_broad_quarterly_liquidity_universe(
+            prices_dir=args.prices_dir,
+            seed_path=args.seed_universe,
+            start=args.start,
+            end=args.end,
+            min_price=args.min_price,
+            min_adv=args.min_adv,
+            lookback_days=args.lookback_days,
+            min_lookback_observations=args.min_lookback_observations,
+            min_history_observations=args.min_history_observations,
+            max_staleness_days=args.max_staleness_days,
+            exclude_tickers=exclude_tickers,
+            max_names=None,
+            universe_source="local_broad_liquidity",
+            constituent_pit_status="local_symbol_universe_not_constituent_pit",
+        )
+        args.output.parent.mkdir(parents=True, exist_ok=True)
+        universe.to_csv(args.output, index=False)
+        print(f"Wrote {len(universe):,} broad quarterly liquidity rows to {args.output}")
+        return
+
+    if args.command == "build-pseudo-russell1000-universe":
+        exclude_tickers = args.exclude_ticker or DEFAULT_EXCLUDED_BROAD_UNIVERSE_TICKERS
+        universe = build_broad_quarterly_liquidity_universe(
+            prices_dir=args.prices_dir,
+            seed_path=args.seed_universe,
+            start=args.start,
+            end=args.end,
+            min_price=args.min_price,
+            min_adv=args.min_adv,
+            lookback_days=args.lookback_days,
+            min_lookback_observations=args.min_lookback_observations,
+            min_history_observations=args.min_history_observations,
+            max_staleness_days=args.max_staleness_days,
+            exclude_tickers=exclude_tickers,
+            max_names=args.max_names,
+            universe_source="pseudo_russell1000_liquidity",
+            constituent_pit_status="not_true_russell_constituents_local_symbols_only",
+        )
+        args.output.parent.mkdir(parents=True, exist_ok=True)
+        universe.to_csv(args.output, index=False)
+        print(
+            f"Wrote {len(universe):,} pseudo Russell 1000 quarterly rows to {args.output}; "
+            f"max names per quarter: {args.max_names:,}"
+        )
+        return
+
+    if args.command == "build-commodity-sensitivity-matrix":
+        commodity_code = args.commodity.upper().strip()
+        output = args.output or Path(f"data/sensitivity/{commodity_code}/{commodity_code}-Sensitivity-Matrix.parquet")
+        matrix = build_commodity_sensitivity_matrix_from_paths(
+            commodity_signals_path=args.commodity_signals,
+            beta_returns_path=args.beta_returns,
+            broad_universe_path=args.broad_universe,
+            output_path=output,
+            commodity=commodity_code,
+            features=args.feature,
+            horizons=args.horizon,
+            sample_years=args.sample_years,
+            start=args.start,
+            end=args.end,
+            feature_z_window=args.feature_z_window,
+            min_feature_observations=args.min_feature_observations,
+            min_observations=args.min_observations,
+            include_prestandardized=args.include_prestandardized,
+            feature_preset=args.feature_preset,
+        )
+        print(f"Wrote {len(matrix):,} {commodity_code} sensitivity matrix rows to {output}")
+        return
+
+    if args.command == "build-daily-feature-return-cache":
+        commodity_code = args.commodity.upper().strip()
+        output = args.output or Path(f"data/cache/feature_return/{commodity_code}.parquet")
+        cache = build_daily_feature_return_cache_from_paths(
+            commodity_signals_path=args.commodity_signals,
+            beta_returns_path=args.beta_returns,
+            output_path=output,
+            commodity=commodity_code,
+            features=args.feature,
+            horizons=args.horizon,
+            feature_preset=args.feature_preset,
+            feature_z_window=args.feature_z_window,
+            min_feature_observations=args.min_feature_observations,
+            min_observations=args.min_observations,
+            include_prestandardized=args.include_prestandardized,
+        )
+        print(f"Wrote {len(cache):,} {commodity_code} daily feature-return cache rows to {output}")
+        return
+
+    if args.command == "build-quarterly-stock-feature-matrix":
+        commodity_code = args.commodity.upper().strip()
+        cache_path = args.cache or Path(f"data/cache/feature_return/{commodity_code}.parquet")
+        output_dir = args.output_dir or Path(f"data/matrix/{commodity_code}")
+        manifest_path = args.manifest or output_dir / f"{commodity_code}-Features-manifest.csv"
+        manifest = write_quarterly_stock_feature_matrix_files_from_paths(
+            cache_path=cache_path,
+            broad_universe_path=args.broad_universe,
+            output_dir=output_dir,
+            manifest_path=manifest_path,
+            commodity=commodity_code,
+            lookback_years=args.lookback_years,
+            horizons=args.horizon,
+            start=args.start,
+            end=args.end,
+            min_observations=args.min_observations,
+        )
+        print(
+            f"Wrote {len(manifest):,} {commodity_code} quarterly stock-feature matrix files "
+            f"to {output_dir}; manifest: {manifest_path}"
+        )
+        return
+
+    if args.command == "classify-commodity-universe-tiers":
+        commodity_code = args.commodity.upper().strip()
+        sensitivity_path = args.sensitivity_matrix or Path(
+            f"data/sensitivity/{commodity_code}/{commodity_code}-Sensitivity-Matrix.parquet"
+        )
+        output = args.output or Path(f"data/processed/{commodity_code.lower()}_universe_tiers.csv")
+        tiers = classify_commodity_universe_tiers_from_paths(
+            sensitivity_matrix_path=sensitivity_path,
+            broad_universe_path=args.broad_universe,
+            exposure_map_path=args.exposure_map,
+            beta_returns_path=args.beta_returns,
+            output_path=output,
+            commodity=commodity_code,
+            min_abs_t=args.min_abs_t,
+            anchor_corr_lookback_days=args.anchor_corr_lookback_days,
+        )
+        print(f"Wrote {len(tiers):,} {commodity_code} universe tier rows to {output}")
+        return
+
+    if args.command == "build-discovered-commodity-universe":
+        commodity_code = args.commodity.upper().strip()
+        tiers_path = args.tiers or Path(f"data/processed/{commodity_code.lower()}_universe_tiers.csv")
+        output = args.output or Path(f"data/processed/{commodity_code.lower()}_discovered_quarterly_universe.csv")
+        universe = build_discovered_commodity_universe_from_paths(
+            tiers_path=tiers_path,
+            output_path=output,
+            output_dir=args.output_dir,
+            commodity=commodity_code,
+            max_names=args.max_names,
+            max_anchor_share=args.max_anchor_share,
+            min_second_order=args.min_second_order,
+            min_discovery_score=args.min_discovery_score,
+        )
+        print(
+            f"Wrote {len(universe):,} {commodity_code} discovered universe rows to {output} "
+            f"and quarter files under {args.output_dir}"
+        )
+        return
+
+    if args.command == "audit-commodity-universe":
+        commodity_code = args.commodity.upper().strip()
+        tiers_path = args.tiers or Path(f"data/processed/{commodity_code.lower()}_universe_tiers.csv")
+        selected_path = args.selected_universe or Path(
+            f"data/processed/{commodity_code.lower()}_discovered_quarterly_universe.csv"
+        )
+        output = args.output or Path(f"data/reports/universe/{commodity_code}-{args.quarter}-audit.csv")
+        audit = audit_commodity_universe_from_paths(
+            tiers_path=tiers_path,
+            selected_universe_path=selected_path,
+            output_path=output,
+            commodity=commodity_code,
+            quarter=args.quarter,
+            max_rejected=args.max_rejected,
+        )
+        print(f"Wrote {len(audit):,} {commodity_code} {args.quarter} universe audit rows to {output}")
+        return
+
+    if args.command == "build-shortability":
+        shortability = build_shortability_from_price_directory(
+            prices_dir=args.prices_dir,
+            min_price=args.min_price,
+            min_adv=args.min_adv,
+            lookback_days=args.lookback_days,
+        )
+        write_frame(shortability, args.output)
+        print(f"Wrote {len(shortability):,} shortability rows to {args.output}")
+        return
+
+    if args.command == "build-portfolio-weights":
+        scores = load_scores(args.scores)
+        if args.mode == "long-short":
+            shortability = load_shortability(args.shortability) if args.shortability else None
+            weights = build_long_short_weights(
+                scores=scores,
+                shortability=shortability,
+                long_count=args.long_count,
+                short_count=args.short_count,
+                gross_long=args.gross_long,
+                gross_short=args.gross_short,
+                shortability_max_staleness_days=args.shortability_max_staleness_days,
+            )
+        else:
+            weights = build_long_index_hedge_weights(
+                scores=scores,
+                long_count=args.long_count,
+                gross_long=args.gross_long,
+                hedge_symbol=args.hedge_symbol,
+                hedge_weight=args.hedge_weight,
+            )
+        write_weights(weights, args.output)
+        print(f"Wrote {len(weights):,} portfolio weight rows to {args.output}")
+        return
+
+    if args.command == "run-backtest":
+        daily, weights, summary = run_score_backtest_from_paths(
+            scores_path=args.scores,
+            prices_dir=args.prices_dir,
+            output_daily_path=args.output_daily,
+            output_weights_path=args.output_weights,
+            output_summary_path=args.output_summary,
+            mode=args.mode,
+            shortability_path=args.shortability,
+            long_count=args.long_count,
+            short_count=args.short_count,
+            gross_long=args.gross_long,
+            gross_short=args.gross_short,
+            hedge_symbol=args.hedge_symbol,
+            hedge_weight=args.hedge_weight,
+            hold_days=args.hold_days,
+            execution_lag_days=args.execution_lag_days,
+            transaction_cost_bps=args.transaction_cost_bps,
+            capital_per_sleeve=args.capital_per_sleeve,
+            shortability_max_staleness_days=args.shortability_max_staleness_days,
+        )
+        print(
+            f"Wrote {len(daily):,} backtest daily rows to {args.output_daily}, "
+            f"{len(weights):,} weight rows to {args.output_weights}, "
+            f"and {len(summary):,} summary rows to {args.output_summary}"
+        )
+        return
+
+    if args.command == "study-feature-reactions":
+        reactions = build_feature_reaction_study_from_paths(
+            commodity_signals_path=args.commodity_signals,
+            prices_dir=args.prices_dir,
+            quarterly_universe_path=args.quarterly_universe,
+            output_path=args.output,
+            features=args.feature,
+            horizons=args.horizon,
+            as_of_date=args.as_of_date,
+            lookback_years=args.lookback_years,
+            shock_z_threshold=args.shock_z_threshold,
+            feature_z_window=args.feature_z_window,
+            min_feature_observations=args.min_feature_observations,
+            min_events=args.min_events,
+            adjust_market=args.adjust_market,
+            non_overlap_events=args.non_overlap_events,
+            residualize=args.residualize,
+            residual_market=args.residual_market,
+            sector_map_path=args.sector_map,
+            beta_lookback_days=args.beta_lookback_days,
+            min_beta_observations=args.min_beta_observations,
+        )
+        print(f"Wrote {len(reactions):,} feature reaction rows to {args.output}")
+        return
+
+    if args.command == "build-candidate-signals":
+        candidates = build_candidate_signals_from_paths(
+            reactions_path=args.reactions,
+            universe_path=args.universe,
+            output_path=args.output,
+            min_events=args.min_events,
+            min_abs_t=args.min_abs_t,
+            min_same_direction_horizons=args.min_same_direction_horizons,
+        )
+        print(f"Wrote {len(candidates):,} candidate signal rows to {args.output}")
+        return
+
+    if args.command == "build-sensitivity-registry":
+        registry = build_stock_sensitivity_registry_from_paths(
+            reactions_path=args.reactions,
+            universe_path=args.universe,
+            output_path=args.output,
+            min_events=args.min_events,
+            min_abs_t=args.min_abs_t,
+            min_same_direction_horizons=args.min_same_direction_horizons,
+        )
+        print(f"Wrote {len(registry):,} sensitivity registry rows to {args.output}")
+        return
+
+    if args.command == "build-daily-scores":
+        scores = build_daily_scores_from_paths(
+            registry_path=args.registry,
+            commodity_signals_path=args.commodity_signals,
+            output_path=args.output,
+            as_of_date=args.as_of_date,
+            feature_z_window=args.feature_z_window,
+            min_feature_observations=args.min_feature_observations,
+        )
+        print(f"Wrote {len(scores):,} daily score rows to {args.output}")
+        return
+
+    if args.command == "build-equity-beta-returns":
+        beta_returns = build_equity_beta_returns_from_paths(
+            prices_dir=args.prices_dir,
+            universe_path=args.universe,
+            theme_hedges_path=args.theme_hedges,
+            output_path=args.output,
+            market_ticker=args.market_ticker,
+            beta_lookback_days=args.beta_lookback_days,
+            beta_lookback_months=args.beta_lookback_months,
+            min_beta_observations=args.min_beta_observations,
+            beta_lag_days=args.beta_lag_days,
+            beta_return_frequency=args.beta_return_frequency,
+            beta_update_frequency=args.beta_update_frequency,
+            beta_weighting=args.beta_weighting,
+            beta_half_life_months=args.beta_half_life_months,
+            beta_smoothing=args.beta_smoothing,
+            hedge_ratio_scale=args.hedge_ratio_scale,
+        )
+        print(f"Wrote {len(beta_returns):,} equity beta/return rows to {args.output}")
+        return
+
+    if args.command == "build-equity-processed-dataset":
+        commodity_beta_symbols = args.commodity_beta_symbol or DEFAULT_COMMODITY_BETA_SYMBOLS
+        dataset = build_equity_processed_dataset_from_paths(
+            prices_dir=args.prices_dir,
+            universe_path=args.universe,
+            theme_hedges_path=args.theme_hedges,
+            output_path=args.output,
+            commodity_signals_path=args.commodity_signals,
+            exposure_map_path=args.exposure_map,
+            market_ticker=args.market_ticker,
+            start=args.start,
+            end=args.end,
+            beta_variations=args.beta_variation,
+            primary_variation=args.primary_variation,
+            beta_lag_days=args.beta_lag_days,
+            commodity_beta_symbols=commodity_beta_symbols,
+            commodity_return_column=args.commodity_return_column,
+            include_commodity_beta_residuals=not args.skip_commodity_beta_residuals,
+        )
+        print(f"Wrote {len(dataset):,} processed equity rows to {args.output}")
+        return
+
+    if args.command == "study-commodity-forecast":
+        result = build_commodity_stock_forecast_study_from_paths(
+            commodity_signals_path=args.commodity_signals,
+            beta_returns_path=args.beta_returns,
+            output_path=args.output,
+            commodity=args.commodity,
+            tickers=args.ticker,
+            universe_path=args.universe,
+            theme=args.theme,
+            features=args.feature,
+            horizons=args.horizon,
+            sample_years=args.sample_years,
+            feature_z_window=args.feature_z_window,
+            min_feature_observations=args.min_feature_observations,
+            min_observations=args.min_observations,
+            include_prestandardized=args.include_prestandardized,
+            include_annual=args.include_annual,
+        )
+        print(f"Wrote {len(result):,} commodity forecast rows to {args.output}")
+        return
+
+    if args.command == "list-exposure-universe":
+        exposure = get_exposure_universe(
+            exposure_map_path=args.exposure_map,
+            commodity=args.commodity,
+            min_abs_prior_weight=args.min_abs_prior_weight,
+        )
+        if args.output:
+            args.output.parent.mkdir(parents=True, exist_ok=True)
+            exposure.to_csv(args.output, index=False)
+            print(f"Wrote {len(exposure):,} exposure rows to {args.output}")
+        else:
+            print(exposure.to_string(index=False))
+        return
+
+    if args.command == "list-reviewed-features":
+        reviewed = load_reviewed_features(args.reviewed_features)
+        out = reviewed.copy()
+        if args.enabled_only:
+            out = out[out["default_enabled"]]
+        if args.commodity:
+            keep = args.commodity.upper().strip()
+            out = out[out["commodity"].isin(["ALL", keep])]
+        if args.family:
+            out = out[out["feature_family"] == args.family]
+        if args.output:
+            args.output.parent.mkdir(parents=True, exist_ok=True)
+            out.to_csv(args.output, index=False)
+            print(f"Wrote {len(out):,} reviewed feature rows to {args.output}")
+        else:
+            if args.commodity:
+                features = reviewed_feature_list(reviewed, commodity=args.commodity, enabled_only=args.enabled_only)
+                print("\n".join(features))
+            else:
+                print(out.to_string(index=False))
+        return
+
+    if args.command == "audit-forecast-signals":
+        audit = audit_forecast_from_paths(
+            forecast_paths=args.forecast,
+            exposure_map_path=args.exposure_map,
+            reviewed_features_path=args.reviewed_features,
+            output_path=args.output,
+            aggregate_sample=args.aggregate_sample,
+            high_abs_t=args.high_abs_t,
+            min_same_direction_share=args.min_same_direction_share,
+            min_peer_direction_share=args.min_peer_direction_share,
+        )
+        print(f"Wrote {len(audit):,} forecast audit rows to {args.output}")
+        return
+
+    if args.command == "audit-sensitivity-falsification":
+        audit = audit_sensitivity_falsification_from_paths(
+            matrix_path=args.matrix,
+            exposure_map_path=args.exposure_map,
+            output_path=args.output,
+            min_abs_t=args.min_abs_t,
+            min_nonoverlap_abs_t=args.min_nonoverlap_abs_t,
+            min_effective_observations=args.min_effective_observations,
+            max_overlap_inflation=args.max_overlap_inflation,
+            min_hit_rate_edge=args.min_hit_rate_edge,
+        )
+        print(f"Wrote {len(audit):,} sensitivity falsification audit rows to {args.output}")
+        return
+
+    if args.command == "audit-exposure-taxonomy":
+        summary, unmapped = audit_exposure_taxonomy_from_paths(
+            exposure_map_path=args.exposure_map,
+            role_taxonomy_path=args.role_taxonomy,
+            candidates_path=args.candidates,
+            output_path=args.output,
+            unmapped_output_path=args.unmapped_output,
+        )
+        print(
+            f"Wrote {len(summary):,} exposure taxonomy rows to {args.output} "
+            f"and {len(unmapped):,} unmapped candidate rows to {args.unmapped_output}"
+        )
+        return
+
+    if args.command == "review-candidate-taxonomy":
+        review = review_candidate_taxonomy_from_paths(
+            candidates_path=args.candidates,
+            exposure_map_path=args.exposure_map,
+            role_taxonomy_path=args.role_taxonomy,
+            output_path=args.output,
+        )
+        counts = review["taxonomy_verdict"].value_counts().to_dict() if "taxonomy_verdict" in review else {}
+        print(f"Wrote {len(review):,} candidate taxonomy review rows to {args.output}; verdicts: {counts}")
+        return
+
+    if args.command == "study-registry-turnover":
+        summary, detail = registry_turnover_from_paths(
+            output_path=args.output,
+            detail_output_path=args.detail_output,
+            registry_paths=args.registry,
+            reactions_path=args.reactions,
+            universe_path=args.universe,
+            min_events=args.min_events,
+            min_abs_t=args.min_abs_t,
+            min_same_direction_horizons=args.min_same_direction_horizons,
+        )
+        print(
+            f"Wrote {len(summary):,} turnover summary rows to {args.output} "
+            f"and {len(detail):,} detail rows to {args.detail_output}"
+        )
+        return
+
+    if args.command == "build-group-activation-scores":
+        scores = group_activation_scores_from_paths(
+            registry_path=args.registry,
+            commodity_signals_path=args.commodity_signals,
+            exposure_map_path=args.exposure_map,
+            output_path=args.output,
+            as_of_date=args.as_of_date,
+            activation_z=args.activation_z,
+            feature_z_window=args.feature_z_window,
+            min_feature_observations=args.min_feature_observations,
+            require_exposure=not args.allow_unmapped,
+        )
+        print(f"Wrote {len(scores):,} group activation score rows to {args.output}")
+        return
+
+    if args.command == "consolidate-candidate-signals":
+        consolidated = consolidate_candidate_signals_from_paths(
+            candidates_path=args.candidates,
+            forecast_audit_path=args.forecast_audit,
+            reviewed_features_path=args.reviewed_features,
+            output_path=args.output,
+            min_confidence=args.min_confidence,
+            require_audit_candidate=args.require_audit_candidate,
+            min_same_direction_share=args.min_same_direction_share,
+            min_peer_direction_share=args.min_peer_direction_share,
+            max_per_ticker=args.max_per_ticker,
+        )
+        print(f"Wrote {len(consolidated):,} consolidated candidate signal rows to {args.output}")
+        return
+
+    if args.command == "build-stock-feature-matrix":
+        matrix = build_stock_feature_matrix_from_paths(
+            signals_path=args.signals,
+            output_path=args.output,
+            source=args.source,
+        )
+        print(f"Wrote {len(matrix):,} stock-feature matrix rows to {args.output}")
+        return
+
+    if args.command == "build-stock-feature-matrix-cache":
+        matrix = build_stock_feature_matrix_cache_from_paths(
+            reactions_path=args.reactions,
+            universe_path=args.universe,
+            forecast_audit_path=args.forecast_audit,
+            reviewed_features_path=args.reviewed_features,
+            output_path=args.output,
+            min_events=args.min_events,
+            min_abs_t=args.min_abs_t,
+            min_same_direction_horizons=args.min_same_direction_horizons,
+            min_confidence=args.min_confidence,
+            require_audit_candidate=args.require_audit_candidate,
+            min_same_direction_share=args.min_same_direction_share,
+            min_peer_direction_share=args.min_peer_direction_share,
+            max_per_ticker=args.max_per_ticker,
+            source=args.source,
+        )
+        print(f"Wrote {len(matrix):,} stock-feature matrix cache rows to {args.output}")
+        return
+
+    if args.command == "build-stock-feature-curve-diagnostics":
+        annual, regime, time_regime, summary = build_matrix_curve_diagnostics_from_paths(
+            matrix_path=args.matrix,
+            as_of_date=args.as_of_date,
+            output_annual_path=args.output_annual,
+            output_regime_path=args.output_regime,
+            output_time_regime_path=args.output_time_regime,
+            output_summary_path=args.output_summary,
+            ticker=args.ticker,
+            commodity=args.commodity,
+            feature=args.feature,
+            start=args.start,
+            end=args.end,
+            return_column=args.return_column,
+            activation_z=args.activation_z,
+            exit_z=args.exit_z,
+            position_mode=args.position_mode,
+            transaction_cost_bps=args.transaction_cost_bps,
+        )
+        print(
+            f"Wrote {len(annual):,} annual diagnostic rows to {args.output_annual} "
+            f"{len(regime):,} regime diagnostic rows to {args.output_regime}, "
+            f"{len(time_regime):,} time-regime rows to {args.output_time_regime}, "
+            f"and {len(summary):,} stability summary rows to {args.output_summary}"
+        )
+        return
+
+    if args.command == "classify-commodity-environment":
+        summary, detail = commodity_environment_similarity_from_paths(
+            symbol=args.symbol,
+            commodity_signals_path=args.commodity_signals,
+            output_summary_path=args.output_summary,
+            output_detail_path=args.output_detail,
+            as_of_date=args.as_of_date,
+            start=args.start,
+            current_window_days=args.current_window_days,
+            features=args.feature,
+            min_regime_observations=args.min_regime_observations,
+        )
+        closest = "n/a"
+        if not summary.empty:
+            closest = str(summary.sort_values("rank").iloc[0]["time_regime"])
+        print(
+            f"Wrote {len(summary):,} environment summary rows to {args.output_summary}, "
+            f"{len(detail):,} detail rows to {args.output_detail}; closest regime: {closest}"
+        )
+        return
+
+    if args.command == "build-feature-trade-candidates":
+        stability_paths = args.stability_summary or [
+            Path("data/processed/cl_curve_stability_summary.csv"),
+            Path("data/processed/hg_curve_stability_summary.csv"),
+        ]
+        candidates = build_feature_trade_candidates_from_paths(
+            matrix_path=args.matrix,
+            stability_summary_paths=stability_paths,
+            output_path=args.output,
+            as_of_date=args.as_of_date,
+            commodities=args.commodity,
+            themes=args.theme,
+            commodity_signals_path=args.commodity_signals,
+            environment_start=args.environment_start,
+            environment_window_days=args.environment_window_days,
+            max_per_commodity=args.max_per_commodity,
+            max_per_theme=args.max_per_theme,
+            min_post_covid_active_median_return=args.min_post_covid_active_median_return,
+        )
+        eligible = int(candidates["eligible"].sum()) if "eligible" in candidates.columns else 0
+        print(f"Wrote {len(candidates):,} feature trade candidates to {args.output}; eligible: {eligible:,}")
+        return
+
+    if args.command == "run-feature-basket-backtest":
+        daily, weights, summary = run_feature_basket_backtest_from_paths(
+            candidates_path=args.candidates,
+            matrix_path=args.matrix,
+            output_daily_path=args.output_daily,
+            output_weights_path=args.output_weights,
+            output_summary_path=args.output_summary,
+            as_of_date=args.as_of_date,
+            commodity_signals_path=args.commodity_signals,
+            beta_returns_path=args.beta_returns,
+            start=args.start,
+            end=args.end,
+            return_column=args.return_column,
+            activation_z=args.activation_z,
+            position_mode=args.position_mode,
+            transaction_cost_bps=args.transaction_cost_bps,
+            max_pair_weight=args.max_pair_weight,
+            target_gross=args.target_gross,
+            rebalance_frequency=args.rebalance_frequency,
+            eligible_only=not args.include_ineligible,
+            label=args.label,
+        )
+        sharpe = "n/a" if summary.empty else f"{float(summary.iloc[0]['sharpe']):.2f}"
+        print(
+            f"Wrote {len(daily):,} basket daily rows to {args.output_daily}, "
+            f"{len(weights):,} weight rows to {args.output_weights}, "
+            f"and summary to {args.output_summary}; sharpe: {sharpe}"
+        )
+        return
+
+    if args.command == "build-precision-event-candidates":
+        candidates = build_precision_event_candidates_from_paths(
+            candidates_path=args.candidates,
+            commodity_signals_path=args.commodity_signals,
+            exposure_map_path=args.exposure_map,
+            role_taxonomy_path=args.role_taxonomy,
+            falsification_audit_path=args.falsification_audit,
+            shortability_path=args.shortability,
+            output_path=args.output,
+            as_of_date=args.as_of_date,
+            require_trigger=not args.no_require_trigger,
+            allow_low_priority_roles=args.allow_low_priority_roles,
+            max_names=args.max_names,
+        )
+        counts = candidates["precision_verdict"].value_counts().to_dict() if "precision_verdict" in candidates else {}
+        print(f"Wrote {len(candidates):,} precision event candidates to {args.output}; verdicts: {counts}")
+        return
+
+    if args.command == "build-fundamental-snapshot":
+        snapshot, factors = build_fundamental_snapshot_from_paths(
+            openbb_metrics_path=args.openbb_metrics,
+            edgar_factors_path=args.edgar_factors,
+            exposure_map_path=args.exposure_map,
+            role_taxonomy_path=args.role_taxonomy,
+            output_snapshot_path=args.output_snapshot,
+            output_factors_path=args.output_factors,
+            min_market_cap=args.min_market_cap,
+        )
+        gates = snapshot["fundamental_gate"].value_counts().to_dict() if "fundamental_gate" in snapshot else {}
+        print(
+            f"Wrote {len(snapshot):,} fundamental snapshot rows to {args.output_snapshot}, "
+            f"{len(factors):,} factor rows to {args.output_factors}; gates: {gates}"
+        )
+        return
+
+    if args.command == "build-agriculture-fundamental-events":
+        events = build_agriculture_fundamental_events_from_paths(
+            nass_factors_path=args.nass_factors,
+            usda_report_factors_path=args.usda_report_factors,
+            output_path=args.output,
+            usda_tradable_hour_utc=args.usda_tradable_hour_utc,
+        )
+        counts = events["source_type"].value_counts().to_dict() if "source_type" in events else {}
+        print(f"Wrote {len(events):,} agriculture fundamental event rows to {args.output}; sources: {counts}")
+        return
+
+    if args.command == "build-commodity-confirmation-events":
+        events = build_commodity_confirmation_events_from_paths(
+            eia_factors_path=args.eia_factors,
+            cftc_factors_path=args.cftc_factors,
+            output_path=args.output,
+            commodity=args.commodity,
+            eia_tradable_lag_days=args.eia_tradable_lag_days,
+            cftc_tradable_lag_days=args.cftc_tradable_lag_days,
+        )
+        counts = events["source_type"].value_counts().to_dict() if "source_type" in events else {}
+        print(f"Wrote {len(events):,} commodity confirmation rows to {args.output}; sources: {counts}")
+        return
+
+    parser.error(f"Unknown command: {args.command}")

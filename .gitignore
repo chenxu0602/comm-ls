@@ -1,0 +1,165 @@
+# -----------------------------------------------------------------------------
+# Python / build artifacts
+# -----------------------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+wheels/
+*.egg-info/
+.eggs/
+pip-wheel-metadata/
+
+# -----------------------------------------------------------------------------
+# Virtual environments and local tool caches
+# -----------------------------------------------------------------------------
+.venv/
+venv/
+env/
+.env
+.env.*
+!.env.example
+.python-version.local
+.ruff_cache/
+.mypy_cache/
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+.nox/
+.uv-cache/
+
+# -----------------------------------------------------------------------------
+# IDE / OS noise
+# -----------------------------------------------------------------------------
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# -----------------------------------------------------------------------------
+# Logs and local scratch files
+# -----------------------------------------------------------------------------
+*.log
+logs/
+tmp/
+temp/
+scratch/
+*.tmp
+*.bak
+
+# -----------------------------------------------------------------------------
+# Secrets / credentials / broker settings
+# -----------------------------------------------------------------------------
+*.pem
+*.key
+*.crt
+*.p12
+*.pfx
+credentials.*
+secrets.*
+ibkr*.json
+ibkr*.yaml
+ibkr*.yml
+tws*.json
+tws*.yaml
+tws*.yml
+
+# -----------------------------------------------------------------------------
+# Strategy-sensitive configuration
+#
+# Keep private universes, exposure maps, reviewed feature lists, hedge mappings,
+# and MCP source paths out of the public repository. Publish sanitized examples
+# with .example.csv or .template.csv if needed.
+# -----------------------------------------------------------------------------
+AGENTS.md
+.agents/
+.codex/
+config/*.csv
+config/*.parquet
+config/*.xlsx
+config/*.json
+config/*.yaml
+config/*.yml
+!config/*.example.csv
+!config/*.template.csv
+!config/*.example.json
+!config/*.template.json
+!config/*.example.yaml
+!config/*.template.yaml
+!config/*.example.yml
+!config/*.template.yml
+
+# -----------------------------------------------------------------------------
+# Data assets
+#
+# Raw commodity contracts, yfinance files, processed panels, matrices,
+# sensitivities, cache files, reports, and generated universes expose the
+# strategy's research surface. Ignore all of them by default.
+# -----------------------------------------------------------------------------
+data/**
+!data/
+!data/.gitkeep
+!data/**/.gitkeep
+!data/examples/
+!data/examples/**
+!data/sample/
+!data/sample/**
+
+# Common large/sensitive research formats anywhere in the repo.
+*.parquet
+*.feather
+*.h5
+*.hdf
+*.hdf5
+*.pkl
+*.pickle
+*.sqlite
+*.sqlite3
+*.db
+*.duckdb
+
+# -----------------------------------------------------------------------------
+# Notebooks
+#
+# Notebooks often contain outputs, screenshots, parameters, and ad hoc feature
+# tests. Keep them private unless a sanitized notebook is explicitly named
+# *.public.ipynb.
+# -----------------------------------------------------------------------------
+notebooks/*.ipynb
+!notebooks/*.public.ipynb
+.ipynb_checkpoints/
+
+# -----------------------------------------------------------------------------
+# Generated reports / research exports outside data/
+# -----------------------------------------------------------------------------
+reports/
+outputs/
+artifacts/
+exports/
+research_outputs/
+*.html
+*.pdf
+
+# -----------------------------------------------------------------------------
+# Docs
+#
+# Most current docs describe feature names, feature-selection logic, candidate
+# gates, and live-trading assumptions. Keep them private by default. Use
+# docs/public/ or *.public.md for sanitized GitHub-facing documentation.
+# -----------------------------------------------------------------------------
+docs/**
+!docs/
+!docs/.gitkeep
+!docs/public/
+!docs/public/**
+!docs/**/*.public.md
+docs/private/
+docs/**/*.private.md
+docs/**/*.internal.md
