@@ -51,6 +51,33 @@ CORE_PRICE_MOMENTUM_FEATURES = [
     "drawdown_63d",
     "breakout_252d",
 ]
+FRONT_PRICE_REGIME_FEATURES = [
+    "front_price_high_share_63d_q80_3y",
+    "front_price_high_share_100d_q80_3y",
+    "front_price_high_share_126d_q80_3y",
+    "front_price_high_days_100d_q80_3y",
+    "front_price_high_excess_100d_q80_3y",
+    "front_price_high_consecutive_days_q80_3y",
+    "front_price_high_share_63d_q90_3y",
+    "front_price_high_share_100d_q90_3y",
+    "front_price_high_share_126d_q90_3y",
+    "front_price_high_days_100d_q90_3y",
+    "front_price_high_excess_100d_q90_3y",
+    "front_price_high_consecutive_days_q90_3y",
+    "front_price_low_share_63d_q20_3y",
+    "front_price_low_share_100d_q20_3y",
+    "front_price_low_share_126d_q20_3y",
+    "front_price_low_days_100d_q20_3y",
+    "front_price_low_shortfall_100d_q20_3y",
+    "front_price_low_consecutive_days_q20_3y",
+    "front_price_low_share_63d_q10_3y",
+    "front_price_low_share_100d_q10_3y",
+    "front_price_low_share_126d_q10_3y",
+    "front_price_low_days_100d_q10_3y",
+    "front_price_low_shortfall_100d_q10_3y",
+    "front_price_low_consecutive_days_q10_3y",
+]
+
 CURVE_SHOCK_VOL_FEATURES = [
     "front_second_spread",
     "front_third_spread",
@@ -98,6 +125,7 @@ CURVE_SHOCK_VOL_FEATURES = [
 ]
 BROAD_DISCOVERY_FEATURES = [
     *CORE_PRICE_MOMENTUM_FEATURES,
+    *FRONT_PRICE_REGIME_FEATURES,
     *CURVE_SHOCK_VOL_FEATURES,
 ]
 DISCOVERY_FEATURE_PRESETS = {

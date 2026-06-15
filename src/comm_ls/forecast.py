@@ -13,6 +13,8 @@ DEFAULT_FORECAST_HORIZONS = [1, 5, 10, 21]
 
 
 def _category_for(feature: str) -> str:
+    if feature.startswith(("front_price_high_", "front_price_low_")):
+        return "price_regime"
     if feature.startswith(("volume", "oi", "price_volume", "price_oi")):
         return "participation"
     if (

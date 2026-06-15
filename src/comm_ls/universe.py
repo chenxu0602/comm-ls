@@ -50,7 +50,7 @@ def build_quarterly_liquidity_universe(
     seed_path: Path,
     prices_dir: Path,
     min_price: float = 5.0,
-    min_adv: float = 10_000_000.0,
+    min_adv: float = 5_000_000.0,
     lookback_days: int = 63,
 ) -> pd.DataFrame:
     seed = load_seed_universe(seed_path)
@@ -106,7 +106,7 @@ def build_broad_quarterly_liquidity_universe(
     start: str = "2010-01-01",
     end: str | None = None,
     min_price: float = 5.0,
-    min_adv: float = 10_000_000.0,
+    min_adv: float = 5_000_000.0,
     lookback_days: int = 63,
     min_lookback_observations: int = 42,
     min_history_observations: int = 252,
@@ -249,7 +249,7 @@ def build_commodity_quarterly_universes(
     start: str = "2010-01-01",
     end: str | None = None,
     min_price: float = 5.0,
-    min_adv: float = 10_000_000.0,
+    min_adv: float = 5_000_000.0,
     lookback_days: int = 63,
     min_lookback_observations: int = 42,
     min_history_observations: int = 252,

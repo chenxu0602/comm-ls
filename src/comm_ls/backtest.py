@@ -45,6 +45,12 @@ def _max_drawdown(equity: pd.Series) -> float:
     return float(drawdown.min())
 
 
+def _calmar_ratio(annualized_return: float, max_drawdown: float) -> float:
+    if not np.isfinite(annualized_return) or not np.isfinite(max_drawdown) or max_drawdown >= 0:
+        return np.nan
+    return float(annualized_return / abs(max_drawdown))
+
+
 def _portfolio_weights_for_scores(
     score_slice: pd.DataFrame,
     mode: str,
@@ -202,6 +208,7 @@ def run_score_backtest(
     ann_return = float(daily["equity"].iloc[-1] ** (252 / n_days) - 1.0) if n_days else np.nan
     ann_vol = float(daily["net_return"].std(ddof=0) * np.sqrt(252)) if n_days else np.nan
     sharpe = ann_return / ann_vol if ann_vol and not np.isnan(ann_vol) else np.nan
+    max_drawdown = _max_drawdown(daily["equity"])
 
     summary = pd.DataFrame(
         [
@@ -219,7 +226,8 @@ def run_score_backtest(
                 "annualized_return": ann_return,
                 "annualized_volatility": ann_vol,
                 "sharpe": sharpe,
-                "max_drawdown": _max_drawdown(daily["equity"]),
+                "calmar": _calmar_ratio(ann_return, max_drawdown),
+                "max_drawdown": max_drawdown,
                 "average_active_sleeves": float(daily["active_sleeves"].mean()),
             }
         ]

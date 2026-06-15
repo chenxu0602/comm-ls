@@ -273,11 +273,15 @@ def _feature_commodity_direction(feature: str) -> float:
     name = str(feature)
     if "backwardation_steepness" in name:
         return 1.0
+    if name == "days_in_backwardation":
+        return 1.0
     if name in {"front_second_spread", "front_third_spread"} or name.endswith("_spread"):
         return 1.0
     if "annualized_carry" in name:
         return -1.0
     if name in {"carry", "carry_chg_5d", "carry_chg_21d", "carry_pctile_252d"}:
+        return -1.0
+    if name.startswith("drawdown"):
         return -1.0
     if (
         "log_ret" in name

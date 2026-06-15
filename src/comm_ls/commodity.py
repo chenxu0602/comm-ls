@@ -45,6 +45,10 @@ ACTIVE_CONTRACT_MONTHS_BY_SYMBOL = {
     # SI/HG concentrate liquidity in odd months, but November is thin and December is active.
     "SI": (1, 3, 5, 7, 9, 12),
     "HG": (1, 3, 5, 7, 9, 12),
+    # GFEX (Guangzhou Futures Exchange) — all 12 months trade.
+    "LC": ALL_CONTRACT_MONTHS,
+    "IS": ALL_CONTRACT_MONTHS,
+    "PS": ALL_CONTRACT_MONTHS,
 }
 LIQUID_DEFERRED_MIN_MONTHS = 6
 
@@ -111,28 +115,66 @@ def _liquid_deferred_contract(
     return pd.Series(contracts, index=front_contract.index, dtype="string")
 
 
+def _normalize_contract_market_data(
+    df: pd.DataFrame,
+    contract: str | None = None,
+    source_priority: int = 0,
+) -> pd.DataFrame:
+    required = {"date", "px_settle", "px_last"}
+    if required.difference(df.columns):
+        return pd.DataFrame(columns=["date", "contract", "settle", "volume", "open_interest", "source_priority"])
+
+    out = df.copy()
+    out["date"] = pd.to_datetime(out["date"], utc=False)
+    if contract is None:
+        if "contract" not in out.columns:
+            return pd.DataFrame(columns=["date", "contract", "settle", "volume", "open_interest", "source_priority"])
+        out["contract"] = out["contract"].astype("string").str.strip().str.upper()
+    else:
+        out["contract"] = contract.upper()
+
+    settle = pd.to_numeric(out["px_settle"], errors="coerce")
+    last = pd.to_numeric(out["px_last"], errors="coerce")
+    out["settle"] = settle.fillna(last)
+    out["volume"] = pd.to_numeric(out["volume"], errors="coerce") if "volume" in out.columns else np.nan
+    out["open_interest"] = pd.to_numeric(out["open int"], errors="coerce") if "open int" in out.columns else np.nan
+    out["source_priority"] = source_priority
+    return out[["date", "contract", "settle", "volume", "open_interest", "source_priority"]]
+
+
+def _live_contract_market_data_path(symbol_dir: Path) -> Path:
+    return symbol_dir.parent / "live_data" / f"{symbol_dir.name.upper()}.csv"
+
+
+def _prefer_historical_contract_rows(market: pd.DataFrame) -> pd.DataFrame:
+    if market.empty:
+        return market
+    out = market.copy()
+    out["_settle_missing"] = pd.to_numeric(out["settle"], errors="coerce").isna()
+    out = out.sort_values(["date", "contract", "_settle_missing", "source_priority"])
+    return out.drop_duplicates(["date", "contract"], keep="first").drop(columns=["_settle_missing"])
+
+
 def _load_contract_market_data(symbol_dir: Path) -> pd.DataFrame:
     frames: list[pd.DataFrame] = []
     for path in sorted(symbol_dir.glob("*.csv")):
         contract = path.stem.upper()
         df = pd.read_csv(path)
-        required = {"date", "px_settle", "px_last"}
-        if required.difference(df.columns):
-            continue
-        df["date"] = pd.to_datetime(df["date"], utc=False)
-        df["contract"] = contract
-        settle = pd.to_numeric(df["px_settle"], errors="coerce")
-        last = pd.to_numeric(df["px_last"], errors="coerce")
-        df["settle"] = settle.fillna(last)
-        df["volume"] = pd.to_numeric(df["volume"], errors="coerce") if "volume" in df.columns else np.nan
-        df["open_interest"] = pd.to_numeric(df["open int"], errors="coerce") if "open int" in df.columns else np.nan
-        frames.append(df[["date", "contract", "settle", "volume", "open_interest"]])
+        normalized = _normalize_contract_market_data(df, contract=contract, source_priority=0)
+        if not normalized.empty:
+            frames.append(normalized)
+
+    live_path = _live_contract_market_data_path(symbol_dir)
+    if live_path.exists():
+        normalized = _normalize_contract_market_data(pd.read_csv(live_path), source_priority=1)
+        if not normalized.empty:
+            frames.append(normalized)
 
     if not frames:
         return pd.DataFrame(columns=["date", "contract", "settle", "volume", "open_interest"])
-    out = pd.concat(frames, ignore_index=True)
+    out = _prefer_historical_contract_rows(pd.concat(frames, ignore_index=True))
     out["contract_month"] = _contract_month_start(out["contract"])
-    return out.dropna(subset=["date", "contract_month"]).reset_index(drop=True)
+    return out.drop(columns=["source_priority"]).dropna(subset=["date", "contract_month"]).reset_index(drop=True)
 
 
 def _activity_deferred_contract(
@@ -221,6 +263,76 @@ def _consecutive_days(condition: pd.Series) -> pd.Series:
     return condition.groupby(groups).cumcount().add(1).where(condition, 0)
 
 
+def _front_price_high_regime_features(
+    front: pd.Series,
+    threshold_window: int = 756,
+    threshold_min_periods: int = 252,
+) -> dict[str, pd.Series]:
+    features: dict[str, pd.Series] = {}
+    front_value = pd.to_numeric(front, errors="coerce")
+    safe_front = front_value.where(front_value > 0)
+
+    for quantile, label in [(0.80, "q80"), (0.90, "q90")]:
+        threshold = safe_front.shift(1).rolling(
+            threshold_window,
+            min_periods=threshold_min_periods,
+        ).quantile(quantile)
+        valid_threshold = threshold.notna() & safe_front.notna()
+        is_high = safe_front.gt(threshold).where(valid_threshold)
+        high_indicator = is_high.astype(float)
+        for window, min_periods in [(63, 21), (100, 30), (126, 42)]:
+            features[f"front_price_high_share_{window}d_{label}_3y"] = (
+                high_indicator.rolling(window, min_periods=min_periods).mean()
+            )
+        features[f"front_price_high_days_100d_{label}_3y"] = (
+            high_indicator.rolling(100, min_periods=30).sum()
+        )
+        excess = np.log(safe_front / threshold).where(is_high.fillna(False), 0.0).where(valid_threshold)
+        features[f"front_price_high_excess_100d_{label}_3y"] = (
+            excess.rolling(100, min_periods=30).mean()
+        )
+        features[f"front_price_high_consecutive_days_{label}_3y"] = (
+            _consecutive_days(is_high).where(valid_threshold)
+        )
+
+    return features
+
+
+def _front_price_low_regime_features(
+    front: pd.Series,
+    threshold_window: int = 756,
+    threshold_min_periods: int = 252,
+) -> dict[str, pd.Series]:
+    features: dict[str, pd.Series] = {}
+    front_value = pd.to_numeric(front, errors="coerce")
+    safe_front = front_value.where(front_value > 0)
+
+    for quantile, label in [(0.20, "q20"), (0.10, "q10")]:
+        threshold = safe_front.shift(1).rolling(
+            threshold_window,
+            min_periods=threshold_min_periods,
+        ).quantile(quantile)
+        valid_threshold = threshold.notna() & safe_front.notna()
+        is_low = safe_front.lt(threshold).where(valid_threshold)
+        low_indicator = is_low.astype(float)
+        for window, min_periods in [(63, 21), (100, 30), (126, 42)]:
+            features[f"front_price_low_share_{window}d_{label}_3y"] = (
+                low_indicator.rolling(window, min_periods=min_periods).mean()
+            )
+        features[f"front_price_low_days_100d_{label}_3y"] = (
+            low_indicator.rolling(100, min_periods=30).sum()
+        )
+        shortfall = np.log(threshold / safe_front).where(is_low.fillna(False), 0.0).where(valid_threshold)
+        features[f"front_price_low_shortfall_100d_{label}_3y"] = (
+            shortfall.rolling(100, min_periods=30).mean()
+        )
+        features[f"front_price_low_consecutive_days_{label}_3y"] = (
+            _consecutive_days(is_low).where(valid_threshold)
+        )
+
+    return features
+
+
 def load_carry_file(path: Path) -> pd.DataFrame:
     df = pd.read_csv(path)
     missing = REQUIRED_CARRY_COLUMNS.difference(df.columns)
@@ -260,16 +372,23 @@ def _load_contract_settles(
         if not path.exists():
             continue
         df = pd.read_csv(path, usecols=["date", "px_settle", "px_last"])
-        df["date"] = pd.to_datetime(df["date"], utc=False)
-        df[contract_column] = contract
-        settle = pd.to_numeric(df["px_settle"], errors="coerce")
-        last = pd.to_numeric(df["px_last"], errors="coerce")
-        df[settle_column] = settle.fillna(last)
-        frames.append(df[["date", contract_column, settle_column]])
+        normalized = _normalize_contract_market_data(df, contract=contract, source_priority=0)
+        if not normalized.empty:
+            frames.append(normalized)
+
+    live_path = _live_contract_market_data_path(symbol_dir)
+    if live_path.exists():
+        live = _normalize_contract_market_data(pd.read_csv(live_path), source_priority=1)
+        keep_contracts = set(contracts.dropna().astype(str).str.upper())
+        live = live[live["contract"].isin(keep_contracts)].copy()
+        if not live.empty:
+            frames.append(live)
 
     if not frames:
         return pd.DataFrame(columns=["date", contract_column, settle_column])
-    return pd.concat(frames, ignore_index=True)
+    out = _prefer_historical_contract_rows(pd.concat(frames, ignore_index=True))
+    out = out.rename(columns={"contract": contract_column, "settle": settle_column})
+    return out[["date", contract_column, settle_column]]
 
 
 def _same_contract_log_return(settle: pd.Series, contract: pd.Series, periods: int) -> pd.Series:
@@ -499,6 +618,8 @@ def build_commodity_signal_frame(carry: pd.DataFrame, commodity_dir: Path | None
             g["total_volume"] / g["total_volume"].rolling(63, min_periods=21).median() - 1.0
         )
         oi_surge_63d = g["total_oi"] / g["total_oi"].rolling(63, min_periods=21).median() - 1.0
+        front_price_high_features = _front_price_high_regime_features(front)
+        front_price_low_features = _front_price_low_regime_features(front)
 
         out = pd.DataFrame(
             {
@@ -556,6 +677,8 @@ def build_commodity_signal_frame(carry: pd.DataFrame, commodity_dir: Path | None
                 "volume_z_252d": _rolling_z(g["total_volume"]),
                 "oi_surge_63d": oi_surge_63d,
                 "oi_z_252d": _rolling_z(g["total_oi"]),
+                **front_price_high_features,
+                **front_price_low_features,
             }
         )
 

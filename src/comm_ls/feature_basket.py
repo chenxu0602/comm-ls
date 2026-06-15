@@ -238,6 +238,7 @@ def _summary_metrics(daily: pd.DataFrame) -> dict[str, object]:
             "gross_annualized_return": np.nan,
             "annualized_volatility": np.nan,
             "sharpe": np.nan,
+            "calmar": np.nan,
             "max_drawdown": np.nan,
             "average_active_pairs": np.nan,
             "average_gross_exposure": np.nan,
@@ -253,6 +254,13 @@ def _summary_metrics(daily: pd.DataFrame) -> dict[str, object]:
     annualized_vol = float(returns.std(ddof=0) * np.sqrt(252)) if n_days else np.nan
     gross_annualized_return = float((1.0 + gross).cumprod().iloc[-1] ** (252 / n_days) - 1.0) if n_days else np.nan
     drawdown = equity / equity.cummax() - 1.0
+    max_drawdown = float(drawdown.min())
+    sharpe = annualized_return / annualized_vol if annualized_vol and not np.isnan(annualized_vol) else np.nan
+    calmar = (
+        annualized_return / abs(max_drawdown)
+        if np.isfinite(annualized_return) and np.isfinite(max_drawdown) and max_drawdown < 0
+        else np.nan
+    )
     return {
         "start_date": daily["date"].min(),
         "end_date": daily["date"].max(),
@@ -261,8 +269,9 @@ def _summary_metrics(daily: pd.DataFrame) -> dict[str, object]:
         "annualized_return": annualized_return,
         "gross_annualized_return": gross_annualized_return,
         "annualized_volatility": annualized_vol,
-        "sharpe": annualized_return / annualized_vol if annualized_vol and not np.isnan(annualized_vol) else np.nan,
-        "max_drawdown": float(drawdown.min()),
+        "sharpe": sharpe,
+        "calmar": calmar,
+        "max_drawdown": max_drawdown,
         "average_active_pairs": float(daily["active_pairs"].mean()),
         "average_gross_exposure": float(daily["gross_exposure"].mean()),
         "annualized_turnover": float(daily["turnover"].mean() * 252),
@@ -293,6 +302,7 @@ def _performance_summary(daily: pd.DataFrame, weights: pd.DataFrame, label: str)
                 "exclude_event_annualized_return": non_event_metrics["annualized_return"],
                 "exclude_event_annualized_volatility": non_event_metrics["annualized_volatility"],
                 "exclude_event_sharpe": non_event_metrics["sharpe"],
+                "exclude_event_calmar": non_event_metrics["calmar"],
                 "exclude_event_max_drawdown": non_event_metrics["max_drawdown"],
                 "hormuz_trading_days": hormuz_metrics["trading_days"],
                 "hormuz_total_return": hormuz_metrics["total_return"],

@@ -25,6 +25,12 @@ def _max_drawdown(returns: pd.Series) -> float:
     return float((equity / peak - 1.0).min())
 
 
+def _calmar_ratio(annualized_return: float, max_drawdown: float) -> float:
+    if not np.isfinite(annualized_return) or not np.isfinite(max_drawdown) or max_drawdown >= 0:
+        return np.nan
+    return float(annualized_return / abs(max_drawdown))
+
+
 def _curve_annual_summary(curve: pd.DataFrame) -> pd.DataFrame:
     if curve.empty:
         return pd.DataFrame()
@@ -40,6 +46,8 @@ def _curve_annual_summary(curve: pd.DataFrame) -> pd.DataFrame:
         returns = pd.to_numeric(group["strategy_return"], errors="coerce").fillna(0.0)
         active = group[group["active_position"]].copy()
         active_returns = pd.to_numeric(active["strategy_return"], errors="coerce").fillna(0.0)
+        total_return = float((1.0 + returns).prod() - 1.0)
+        max_drawdown = _max_drawdown(returns)
         rows.append(
             {
                 "year": int(year),
@@ -47,12 +55,14 @@ def _curve_annual_summary(curve: pd.DataFrame) -> pd.DataFrame:
                 "trading_days": int(len(group)),
                 "active_days": int(group["active_position"].sum()),
                 "active_day_share": float(group["active_position"].mean()),
-                "total_return": float((1.0 + returns).prod() - 1.0),
+                "total_return": total_return,
+                "annualized_return": total_return,
                 "active_period_return": float((1.0 + active_returns).prod() - 1.0) if len(active) else 0.0,
                 "mean_daily_return": float(returns.mean()),
                 "daily_volatility": float(returns.std(ddof=0)),
                 "hit_rate": float((active_returns > 0).mean()) if len(active) else np.nan,
-                "max_drawdown": _max_drawdown(returns),
+                "calmar": _calmar_ratio(total_return, max_drawdown),
+                "max_drawdown": max_drawdown,
                 "mean_feature_z": float(pd.to_numeric(group["feature_z"], errors="coerce").mean()),
                 "max_abs_feature_z": float(pd.to_numeric(group["feature_z"], errors="coerce").abs().max()),
             }
@@ -109,21 +119,27 @@ def _curve_time_regime_summary(curve: pd.DataFrame) -> pd.DataFrame:
         returns = pd.to_numeric(group["strategy_return"], errors="coerce").fillna(0.0)
         active = group[group["active_position"]].copy()
         active_returns = pd.to_numeric(active["strategy_return"], errors="coerce").fillna(0.0)
+        trading_days = int(len(group))
+        total_return = float((1.0 + returns).prod() - 1.0)
+        annualized_return = float((1.0 + total_return) ** (252 / trading_days) - 1.0) if trading_days else np.nan
+        max_drawdown = _max_drawdown(returns)
         rows.append(
             {
                 "time_regime": time_regime,
                 "start_date": group["date"].min(),
                 "end_date": group["date"].max(),
                 "calendar_years": int(group["date"].dt.year.nunique()),
-                "trading_days": int(len(group)),
+                "trading_days": trading_days,
                 "active_days": int(group["active_position"].sum()),
                 "active_day_share": float(group["active_position"].mean()),
-                "total_return": float((1.0 + returns).prod() - 1.0),
+                "total_return": total_return,
+                "annualized_return": annualized_return,
                 "active_period_return": float((1.0 + active_returns).prod() - 1.0) if len(active) else 0.0,
                 "mean_daily_return": float(returns.mean()),
                 "daily_volatility": float(returns.std(ddof=0)),
                 "hit_rate": float((active_returns > 0).mean()) if len(active) else np.nan,
-                "max_drawdown": _max_drawdown(returns),
+                "calmar": _calmar_ratio(annualized_return, max_drawdown),
+                "max_drawdown": max_drawdown,
                 "mean_position": float(pd.to_numeric(group["position"], errors="coerce").fillna(0.0).mean()),
                 "mean_feature_z": float(pd.to_numeric(group["feature_z"], errors="coerce").mean()),
                 "max_abs_feature_z": float(pd.to_numeric(group["feature_z"], errors="coerce").abs().max()),

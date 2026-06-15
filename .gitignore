@@ -132,6 +132,7 @@ data/**
 # tests. Keep them private unless a sanitized notebook is explicitly named
 # *.public.ipynb.
 # -----------------------------------------------------------------------------
+notebooks/*.py
 notebooks/*.ipynb
 !notebooks/*.public.ipynb
 .ipynb_checkpoints/
@@ -163,3 +164,9 @@ docs/**
 docs/private/
 docs/**/*.private.md
 docs/**/*.internal.md
+
+# -----------------------------------------------------------------------------
+# Research artefacts: scripts, figures, reports — keep private.
+# -----------------------------------------------------------------------------
+scripts/
+figures/

@@ -14,6 +14,7 @@ from comm_ls.beta import (
 )
 from comm_ls.candidates import build_candidate_signals_from_paths
 from comm_ls.commodity import build_commodity_signal_frame, load_carry_directory, write_frame
+from comm_ls.commodity_research import research_commodity_features_from_paths
 from comm_ls.curve_diagnostics import build_matrix_curve_diagnostics_from_paths
 from comm_ls.equity import download_yfinance_prices
 from comm_ls.environment import commodity_environment_similarity_from_paths
@@ -56,6 +57,7 @@ from comm_ls.research_quality import (
     review_candidate_taxonomy_from_paths,
     reviewed_feature_list,
 )
+from comm_ls.selection_backtest import run_quarterly_selection_backtest_from_paths
 from comm_ls.shortability import build_shortability_from_price_directory
 from comm_ls.sensitivity import build_daily_scores_from_paths, build_stock_sensitivity_registry_from_paths
 from comm_ls.universe import (
@@ -93,7 +95,7 @@ def build_parser() -> argparse.ArgumentParser:
     quarterly.add_argument("--prices-dir", type=Path, default=Path("data/equity/yfinance"))
     quarterly.add_argument("--output", type=Path, default=Path("data/processed/quarterly_universe.csv"))
     quarterly.add_argument("--min-price", type=float, default=5.0)
-    quarterly.add_argument("--min-adv", type=float, default=10_000_000.0)
+    quarterly.add_argument("--min-adv", type=float, default=5_000_000.0)
     quarterly.add_argument("--lookback-days", type=int, default=63)
 
     commodity_quarterly = subparsers.add_parser("build-commodity-quarterly-universes")
@@ -110,7 +112,7 @@ def build_parser() -> argparse.ArgumentParser:
         default=Path("data/processed/cl_hg_quarterly_universe.csv"),
     )
     commodity_quarterly.add_argument("--min-price", type=float, default=5.0)
-    commodity_quarterly.add_argument("--min-adv", type=float, default=10_000_000.0)
+    commodity_quarterly.add_argument("--min-adv", type=float, default=5_000_000.0)
     commodity_quarterly.add_argument("--lookback-days", type=int, default=63)
     commodity_quarterly.add_argument("--min-lookback-observations", type=int, default=42)
     commodity_quarterly.add_argument("--min-history-observations", type=int, default=252)
@@ -124,7 +126,7 @@ def build_parser() -> argparse.ArgumentParser:
     broad_quarterly.add_argument("--start", default="2010-01-01")
     broad_quarterly.add_argument("--end", default=None)
     broad_quarterly.add_argument("--min-price", type=float, default=5.0)
-    broad_quarterly.add_argument("--min-adv", type=float, default=10_000_000.0)
+    broad_quarterly.add_argument("--min-adv", type=float, default=5_000_000.0)
     broad_quarterly.add_argument("--lookback-days", type=int, default=63)
     broad_quarterly.add_argument("--min-lookback-observations", type=int, default=42)
     broad_quarterly.add_argument("--min-history-observations", type=int, default=252)
@@ -143,7 +145,7 @@ def build_parser() -> argparse.ArgumentParser:
     pseudo_russell.add_argument("--end", default=None)
     pseudo_russell.add_argument("--max-names", type=int, default=1000)
     pseudo_russell.add_argument("--min-price", type=float, default=5.0)
-    pseudo_russell.add_argument("--min-adv", type=float, default=10_000_000.0)
+    pseudo_russell.add_argument("--min-adv", type=float, default=5_000_000.0)
     pseudo_russell.add_argument("--lookback-days", type=int, default=63)
     pseudo_russell.add_argument("--min-lookback-observations", type=int, default=42)
     pseudo_russell.add_argument("--min-history-observations", type=int, default=252)
@@ -191,6 +193,7 @@ def build_parser() -> argparse.ArgumentParser:
     feature_return_cache.add_argument("--min-feature-observations", type=int, default=126)
     feature_return_cache.add_argument("--min-observations", type=int, default=126)
     feature_return_cache.add_argument("--include-prestandardized", action="store_true")
+    feature_return_cache.add_argument("--return-column", action="append", default=None)
 
     quarterly_matrix = subparsers.add_parser("build-quarterly-stock-feature-matrix")
     quarterly_matrix.add_argument("--commodity", required=True)
@@ -207,6 +210,33 @@ def build_parser() -> argparse.ArgumentParser:
     quarterly_matrix.add_argument("--start", default=None)
     quarterly_matrix.add_argument("--end", default=None)
     quarterly_matrix.add_argument("--min-observations", type=int, default=126)
+    quarterly_matrix.add_argument("--verbose", action="store_true")
+    quarterly_matrix.add_argument("--progress-interval", type=int, default=25)
+
+    selection_backtest = subparsers.add_parser("run-quarterly-selection-backtest")
+    selection_backtest.add_argument("--commodity", required=True)
+    selection_backtest.add_argument("--feature", action="append", required=True)
+    selection_backtest.add_argument("--ticker", action="append", default=None)
+    selection_backtest.add_argument("--cache", type=Path, required=True)
+    selection_backtest.add_argument("--equity-processed", type=Path, default=Path("data/processed/equity_processed.parquet"))
+    selection_backtest.add_argument("--matrix-dir", type=Path, default=None)
+    selection_backtest.add_argument("--output-dir", type=Path, default=Path("data/backtests"))
+    selection_backtest.add_argument("--target-return-column", default="residual_return_mktsec_w12m")
+    selection_backtest.add_argument("--return-column", action="append", default=None)
+    selection_backtest.add_argument("--horizon-days", type=int, default=21)
+    selection_backtest.add_argument("--lookback-years", action="append", type=int, default=None)
+    selection_backtest.add_argument("--min-nonoverlap-abs-t-stat", type=float, default=1.5)
+    selection_backtest.add_argument("--min-effective-observations", type=int, default=20)
+    selection_backtest.add_argument("--min-selected-lookbacks", type=int, default=1)
+    selection_backtest.add_argument("--min-direction-share", type=float, default=0.5)
+    selection_backtest.add_argument("--min-pairs", type=int, default=2)
+    selection_backtest.add_argument("--basket-scope", choices=["quarter", "feature"], default="quarter")
+    selection_backtest.add_argument("--activation-z", type=float, default=1.5)
+    selection_backtest.add_argument("--trigger-mode", choices=["z-abs", "level-ge", "level-le"], default="z-abs")
+    selection_backtest.add_argument("--activation-level", type=float, default=None)
+    selection_backtest.add_argument("--hold-days", type=int, default=21)
+    selection_backtest.add_argument("--signal-lag-days", type=int, default=1)
+    selection_backtest.add_argument("--gross-exposure", type=float, default=1.0)
 
     tiers = subparsers.add_parser("classify-commodity-universe-tiers")
     tiers.add_argument("--commodity", required=True)
@@ -240,7 +270,7 @@ def build_parser() -> argparse.ArgumentParser:
     shortability.add_argument("--prices-dir", type=Path, default=Path("data/equity/yfinance"))
     shortability.add_argument("--output", type=Path, default=Path("data/processed/shortability.parquet"))
     shortability.add_argument("--min-price", type=float, default=5.0)
-    shortability.add_argument("--min-adv", type=float, default=10_000_000.0)
+    shortability.add_argument("--min-adv", type=float, default=5_000_000.0)
     shortability.add_argument("--lookback-days", type=int, default=63)
 
     portfolio = subparsers.add_parser("build-portfolio-weights")
@@ -729,6 +759,25 @@ def build_parser() -> argparse.ArgumentParser:
     commodity_confirmation.add_argument("--eia-tradable-lag-days", type=int, default=1)
     commodity_confirmation.add_argument("--cftc-tradable-lag-days", type=int, default=3)
 
+    commodity_research = subparsers.add_parser("research-commodity-features")
+    commodity_research.add_argument("--commodity", required=True)
+    commodity_research.add_argument("--matrix-dir", type=Path, default=None)
+    commodity_research.add_argument("--manifest", type=Path, default=None)
+    commodity_research.add_argument("--diagnostic-matrix-dir", type=Path, default=None)
+    commodity_research.add_argument("--diagnostic-manifest", type=Path, default=None)
+    commodity_research.add_argument("--exposure-map", type=Path, default=Path("config/commodity_exposure_map.csv"))
+    commodity_research.add_argument("--role-taxonomy", type=Path, default=Path("config/commodity_role_taxonomy.csv"))
+    commodity_research.add_argument("--reviewed-features", type=Path, default=Path("config/reviewed_commodity_features.csv"))
+    commodity_research.add_argument("--output-dir", type=Path, default=None)
+    commodity_research.add_argument("--quarter", action="append", default=None)
+    commodity_research.add_argument("--include-unreviewed-features", action="store_true")
+    commodity_research.add_argument("--min-abs-t", type=float, default=2.0)
+    commodity_research.add_argument("--min-nonoverlap-abs-t", type=float, default=1.0)
+    commodity_research.add_argument("--min-effective-observations", type=int, default=20)
+    commodity_research.add_argument("--min-hit-rate-edge", type=float, default=0.03)
+    commodity_research.add_argument("--min-sign-stability", type=float, default=0.5)
+    commodity_research.add_argument("--commodity-neutral-min-ratio", type=float, default=0.5)
+
     return parser
 
 
@@ -873,7 +922,15 @@ def main() -> None:
 
     if args.command == "build-daily-feature-return-cache":
         commodity_code = args.commodity.upper().strip()
-        output = args.output or Path(f"data/cache/feature_return/{commodity_code}.parquet")
+        return_columns = args.return_column or ["residual_return"]
+        return_slug = "multi_return" if len(return_columns) > 1 else "".join(
+            ch if ch.isalnum() else "_" for ch in return_columns[0]
+        ).strip("_")
+        output = args.output or (
+            Path(f"data/cache/feature_return/{commodity_code}.parquet")
+            if return_columns == ["residual_return"]
+            else Path(f"data/cache/feature_return/{commodity_code}-{return_slug}.parquet")
+        )
         cache = build_daily_feature_return_cache_from_paths(
             commodity_signals_path=args.commodity_signals,
             beta_returns_path=args.beta_returns,
@@ -886,8 +943,12 @@ def main() -> None:
             min_feature_observations=args.min_feature_observations,
             min_observations=args.min_observations,
             include_prestandardized=args.include_prestandardized,
+            return_column=return_columns,
         )
-        print(f"Wrote {len(cache):,} {commodity_code} daily feature-return cache rows to {output}")
+        print(
+            f"Wrote {len(cache):,} {commodity_code} daily feature-return cache rows "
+            f"using {','.join(return_columns)} to {output}"
+        )
         return
 
     if args.command == "build-quarterly-stock-feature-matrix":
@@ -906,10 +967,47 @@ def main() -> None:
             start=args.start,
             end=args.end,
             min_observations=args.min_observations,
+            verbose=args.verbose,
+            progress_interval=args.progress_interval,
         )
         print(
             f"Wrote {len(manifest):,} {commodity_code} quarterly stock-feature matrix files "
             f"to {output_dir}; manifest: {manifest_path}"
+        )
+        return
+
+    if args.command == "run-quarterly-selection-backtest":
+        commodity_code = args.commodity.upper().strip()
+        matrix_dir = args.matrix_dir or Path(f"data/matrix/{commodity_code}")
+        pair, events, stock_daily, portfolio_daily = run_quarterly_selection_backtest_from_paths(
+            cache_path=args.cache,
+            equity_processed_path=args.equity_processed,
+            matrix_dir=matrix_dir,
+            output_dir=args.output_dir,
+            commodity=commodity_code,
+            feature=args.feature,
+            tickers=args.ticker,
+            target_return_column=args.target_return_column,
+            horizon_days=args.horizon_days,
+            lookback_years=args.lookback_years,
+            min_nonoverlap_abs_t_stat=args.min_nonoverlap_abs_t_stat,
+            min_effective_observations=args.min_effective_observations,
+            min_selected_lookbacks=args.min_selected_lookbacks,
+            min_direction_share=args.min_direction_share,
+            min_pairs=args.min_pairs,
+            basket_scope=args.basket_scope,
+            activation_z=args.activation_z,
+            trigger_mode=args.trigger_mode,
+            activation_level=args.activation_level,
+            hold_days=args.hold_days,
+            signal_lag_days=args.signal_lag_days,
+            gross_exposure=args.gross_exposure,
+            return_columns=args.return_column,
+        )
+        print(
+            f"Wrote {len(pair):,} eligibility rows, {len(events):,} events, "
+            f"{len(stock_daily):,} stock daily rows, and {len(portfolio_daily):,} portfolio daily rows "
+            f"to {args.output_dir / commodity_code}"
         )
         return
 
@@ -1418,10 +1516,11 @@ def main() -> None:
             label=args.label,
         )
         sharpe = "n/a" if summary.empty else f"{float(summary.iloc[0]['sharpe']):.2f}"
+        calmar = "n/a" if summary.empty else f"{float(summary.iloc[0]['calmar']):.2f}"
         print(
             f"Wrote {len(daily):,} basket daily rows to {args.output_daily}, "
             f"{len(weights):,} weight rows to {args.output_weights}, "
-            f"and summary to {args.output_summary}; sharpe: {sharpe}"
+            f"and summary to {args.output_summary}; sharpe: {sharpe}, calmar: {calmar}"
         )
         return
 
@@ -1482,6 +1581,40 @@ def main() -> None:
         )
         counts = events["source_type"].value_counts().to_dict() if "source_type" in events else {}
         print(f"Wrote {len(events):,} commodity confirmation rows to {args.output}; sources: {counts}")
+        return
+
+    if args.command == "research-commodity-features":
+        commodity_code = args.commodity.upper().strip()
+        output_dir = args.output_dir or Path(f"data/research/feature_selection/{commodity_code}")
+        candidate_scores, selected, blocked, role_results = research_commodity_features_from_paths(
+            commodity=commodity_code,
+            matrix_dir=args.matrix_dir,
+            manifest_path=args.manifest,
+            diagnostic_matrix_dir=args.diagnostic_matrix_dir,
+            diagnostic_manifest_path=args.diagnostic_manifest,
+            exposure_map_path=args.exposure_map,
+            role_taxonomy_path=args.role_taxonomy,
+            reviewed_features_path=args.reviewed_features,
+            output_dir=output_dir,
+            quarters=args.quarter,
+            include_unreviewed_features=args.include_unreviewed_features,
+            min_abs_t=args.min_abs_t,
+            min_nonoverlap_abs_t=args.min_nonoverlap_abs_t,
+            min_effective_observations=args.min_effective_observations,
+            min_hit_rate_edge=args.min_hit_rate_edge,
+            min_sign_stability=args.min_sign_stability,
+            commodity_neutral_min_ratio=args.commodity_neutral_min_ratio,
+        )
+        verdicts = (
+            candidate_scores["selection_verdict"].value_counts().to_dict()
+            if "selection_verdict" in candidate_scores
+            else {}
+        )
+        print(
+            f"Wrote {len(candidate_scores):,} {commodity_code} candidate score rows to {output_dir}; "
+            f"selected: {len(selected):,}, blocked: {len(blocked):,}, "
+            f"trigger-role rows: {len(role_results):,}, verdicts: {verdicts}"
+        )
         return
 
     parser.error(f"Unknown command: {args.command}")
