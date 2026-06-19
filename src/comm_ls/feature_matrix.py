@@ -7,7 +7,12 @@ import pandas as pd
 
 from comm_ls.candidates import build_candidate_signals
 from comm_ls.reaction import load_frame
-from comm_ls.research_quality import consolidate_candidate_signals, feature_family, load_reviewed_features
+from comm_ls.research_quality import (
+    consolidate_candidate_signals,
+    feature_family,
+    feature_hypothesis_family,
+    load_reviewed_features,
+)
 from comm_ls.universe import load_seed_universe
 
 
@@ -31,6 +36,8 @@ def build_stock_feature_matrix(
 
     if "feature_family" not in df.columns:
         df["feature_family"] = df["feature"].map(feature_family)
+    if "feature_hypothesis_family" not in df.columns:
+        df["feature_hypothesis_family"] = df["feature"].map(feature_hypothesis_family)
     if "score_weight" not in df.columns:
         sensitivity = pd.to_numeric(df["preferred_mean_signed_return"], errors="coerce").abs()
         t_weight = pd.to_numeric(df["max_abs_tstat"], errors="coerce").clip(upper=5.0)
@@ -65,6 +72,7 @@ def build_stock_feature_matrix(
         "commodity",
         "feature",
         "feature_family",
+        "feature_hypothesis_family",
         "direction",
         "direction_sign",
         "score_weight",

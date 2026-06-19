@@ -4,6 +4,7 @@ import argparse
 from pathlib import Path
 
 from comm_ls.backtest import run_score_backtest_from_paths
+from comm_ls.basket_cluster_risk import build_basket_cluster_risk_audit_from_paths
 from comm_ls.beta import (
     DEFAULT_COMMODITY_BETA_RETURN_COLUMN,
     DEFAULT_COMMODITY_BETA_SYMBOLS,
@@ -15,6 +16,10 @@ from comm_ls.beta import (
 from comm_ls.candidates import build_candidate_signals_from_paths
 from comm_ls.commodity import build_commodity_signal_frame, load_carry_directory, write_frame
 from comm_ls.commodity_research import research_commodity_features_from_paths
+from comm_ls.cross_product_summary import (
+    DEFAULT_DIRECT_OIL_ROLES,
+    summarize_cross_product_clusters_from_paths,
+)
 from comm_ls.curve_diagnostics import build_matrix_curve_diagnostics_from_paths
 from comm_ls.equity import download_yfinance_prices
 from comm_ls.environment import commodity_environment_similarity_from_paths
@@ -37,6 +42,8 @@ from comm_ls.fundamentals import (
     build_commodity_confirmation_events_from_paths,
     build_fundamental_snapshot_from_paths,
 )
+from comm_ls.mechanism_alignment import build_mechanism_alignment_audit_from_paths
+from comm_ls.mechanism_state import build_mechanism_state_model_from_paths
 from comm_ls.portfolio import (
     build_long_index_hedge_weights,
     build_long_short_weights,
@@ -49,6 +56,7 @@ from comm_ls.reaction import build_feature_reaction_study_from_paths
 from comm_ls.research_quality import (
     audit_exposure_taxonomy_from_paths,
     audit_forecast_from_paths,
+    audit_nonlinear_commodity_beta_from_paths,
     audit_sensitivity_falsification_from_paths,
     consolidate_candidate_signals_from_paths,
     group_activation_scores_from_paths,
@@ -57,9 +65,29 @@ from comm_ls.research_quality import (
     review_candidate_taxonomy_from_paths,
     reviewed_feature_list,
 )
+from comm_ls.regime_validity import (
+    DEFAULT_REGIME_DIMENSIONS,
+    build_regime_conditioned_validity_audit_from_paths,
+)
+from comm_ls.regime_adversarial import (
+    build_basket_regime_adversarial_audit_from_paths,
+    build_basket_state_filter_audit_from_paths,
+    build_regime_adversarial_audit_from_paths,
+)
 from comm_ls.selection_backtest import run_quarterly_selection_backtest_from_paths
+from comm_ls.selection_path import simulate_selection_path_stability_from_paths
+from comm_ls.selection_v3 import (
+    review_curve_first_taxonomy_from_paths,
+    run_curve_first_oos_from_paths,
+    select_curve_first_candidates_from_paths,
+)
+from comm_ls.signal_decay import build_signal_decay_audit_from_paths
+from comm_ls.peer_expansion import build_peer_expansion_from_paths
+from comm_ls.macro import build_macro_regime_frame_from_paths
+from comm_ls.year_stability import build_year_stability_audit_from_paths
 from comm_ls.shortability import build_shortability_from_price_directory
 from comm_ls.sensitivity import build_daily_scores_from_paths, build_stock_sensitivity_registry_from_paths
+from comm_ls.state_summary import summarize_state_role_clusters_from_paths
 from comm_ls.universe import (
     build_broad_quarterly_liquidity_universe,
     build_commodity_quarterly_universes,
@@ -207,6 +235,7 @@ def build_parser() -> argparse.ArgumentParser:
     quarterly_matrix.add_argument("--manifest", type=Path, default=None)
     quarterly_matrix.add_argument("--lookback-years", action="append", type=int, default=None)
     quarterly_matrix.add_argument("--horizon", action="append", type=int, default=None)
+    quarterly_matrix.add_argument("--target-return-column", action="append", default=None)
     quarterly_matrix.add_argument("--start", default=None)
     quarterly_matrix.add_argument("--end", default=None)
     quarterly_matrix.add_argument("--min-observations", type=int, default=126)
@@ -237,6 +266,85 @@ def build_parser() -> argparse.ArgumentParser:
     selection_backtest.add_argument("--hold-days", type=int, default=21)
     selection_backtest.add_argument("--signal-lag-days", type=int, default=1)
     selection_backtest.add_argument("--gross-exposure", type=float, default=1.0)
+
+    selection_path = subparsers.add_parser("simulate-selection-path")
+    selection_path.add_argument("--commodity", required=True)
+    selection_path.add_argument("--feature", action="append", required=True)
+    selection_path.add_argument("--ticker", action="append", default=None)
+    selection_path.add_argument("--matrix-dir", type=Path, default=None)
+    selection_path.add_argument("--output-pairs", type=Path, default=None)
+    selection_path.add_argument("--output-baskets", type=Path, default=None)
+    selection_path.add_argument("--target-return-column", default="residual_return_mktsec_w12m")
+    selection_path.add_argument("--horizon-days", type=int, default=21)
+    selection_path.add_argument("--lookback-years", action="append", type=int, default=None)
+    selection_path.add_argument("--min-nonoverlap-abs-t-stat", type=float, default=1.5)
+    selection_path.add_argument("--min-effective-observations", type=int, default=20)
+    selection_path.add_argument("--min-selected-lookbacks", type=int, default=1)
+    selection_path.add_argument("--min-direction-share", type=float, default=0.5)
+    selection_path.add_argument("--min-pairs", type=int, default=2)
+    selection_path.add_argument("--basket-scope", choices=["quarter", "feature"], default="quarter")
+    selection_path.add_argument("--simulations", type=int, default=500)
+    selection_path.add_argument("--t-stat-noise", type=float, default=1.0)
+    selection_path.add_argument("--random-seed", type=int, default=7)
+
+    basket_cluster = subparsers.add_parser("audit-basket-cluster-risk")
+    basket_cluster.add_argument("--selection-pairs", type=Path, required=True)
+    basket_cluster.add_argument("--exposure-map", type=Path, default=Path("config/commodity_exposure_map.csv"))
+    basket_cluster.add_argument("--candidates", type=Path, default=None)
+    basket_cluster.add_argument("--output", type=Path, default=Path("data/processed/basket_cluster_risk_audit.csv"))
+    basket_cluster.add_argument(
+        "--detail-output",
+        type=Path,
+        default=Path("data/processed/basket_cluster_risk_audit_detail.csv"),
+    )
+    basket_cluster.add_argument("--min-selection-probability", type=float, default=0.8)
+    basket_cluster.add_argument("--max-direction-flip-probability", type=float, default=0.1)
+    basket_cluster.add_argument("--min-tickers", type=int, default=5)
+    basket_cluster.add_argument("--min-roles", type=int, default=2)
+    basket_cluster.add_argument("--min-effective-tickers", type=float, default=4.0)
+    basket_cluster.add_argument("--min-effective-roles", type=float, default=1.5)
+    basket_cluster.add_argument("--max-ticker-share", type=float, default=0.35)
+    basket_cluster.add_argument("--max-role-share", type=float, default=0.65)
+    basket_cluster.add_argument("--max-unknown-role-share", type=float, default=0.25)
+    basket_cluster.add_argument("--group-by-feature", action="store_true")
+    basket_cluster.add_argument("--allow-macro-regime", action="store_true")
+
+    mechanism_state = subparsers.add_parser("build-mechanism-state-model")
+    mechanism_state.add_argument("--commodity-signals", type=Path, default=Path("data/processed/commodity_signals.parquet"))
+    mechanism_state.add_argument("--exposure-map", type=Path, default=Path("config/commodity_exposure_map.csv"))
+    mechanism_state.add_argument("--role-taxonomy", type=Path, default=Path("config/commodity_role_taxonomy.csv"))
+    mechanism_state.add_argument("--commodity", default=None)
+    mechanism_state.add_argument("--as-of-date", default=None)
+    mechanism_state.add_argument("--output", type=Path, default=Path("data/processed/mechanism_state_roles.csv"))
+    mechanism_state.add_argument(
+        "--ticker-output",
+        type=Path,
+        default=Path("data/processed/mechanism_state_tickers.csv"),
+    )
+    mechanism_state.add_argument("--curve-z-threshold", type=float, default=1.5)
+    mechanism_state.add_argument("--momentum-z-threshold", type=float, default=1.0)
+    mechanism_state.add_argument("--price-regime-share-threshold", type=float, default=0.6)
+    mechanism_state.add_argument("--vol-z-threshold", type=float, default=1.0)
+    mechanism_state.add_argument("--participation-z-threshold", type=float, default=1.0)
+    mechanism_state.add_argument("--min-spread-abs", type=float, default=0.005)
+    mechanism_state.add_argument("--min-spread-chg-abs", type=float, default=0.01)
+    mechanism_state.add_argument("--min-role-tickers", type=int, default=1)
+
+    mechanism_alignment = subparsers.add_parser("audit-mechanism-alignment")
+    mechanism_alignment.add_argument("--mechanism-tickers", type=Path, required=True)
+    mechanism_alignment.add_argument("--matrix-dir", type=Path, default=None)
+    mechanism_alignment.add_argument("--commodity", default="CL")
+    mechanism_alignment.add_argument("--output", type=Path, default=Path("data/processed/mechanism_alignment_audit.csv"))
+    mechanism_alignment.add_argument(
+        "--detail-output",
+        type=Path,
+        default=Path("data/processed/mechanism_alignment_audit_detail.csv"),
+    )
+    mechanism_alignment.add_argument("--target-return-column", default="residual_return_mktsec_w12m")
+    mechanism_alignment.add_argument("--horizon-days", action="append", type=int, default=None)
+    mechanism_alignment.add_argument("--lookback-years", action="append", type=int, default=None)
+    mechanism_alignment.add_argument("--min-alignment-probability", type=float, default=0.67)
+    mechanism_alignment.add_argument("--review-band", type=float, default=0.55)
 
     tiers = subparsers.add_parser("classify-commodity-universe-tiers")
     tiers.add_argument("--commodity", required=True)
@@ -405,6 +513,7 @@ def build_parser() -> argparse.ArgumentParser:
     equity_processed.add_argument("--commodity-beta-symbol", action="append", default=None)
     equity_processed.add_argument("--commodity-return-column", default=DEFAULT_COMMODITY_BETA_RETURN_COLUMN)
     equity_processed.add_argument("--skip-commodity-beta-residuals", action="store_true")
+    equity_processed.add_argument("--quiet", action="store_true", help="Suppress progress logs.")
 
     forecast = subparsers.add_parser("study-commodity-forecast")
     forecast.add_argument("--commodity-signals", type=Path, default=Path("data/processed/commodity_signals.parquet"))
@@ -456,6 +565,180 @@ def build_parser() -> argparse.ArgumentParser:
     falsification.add_argument("--max-overlap-inflation", type=float, default=3.0)
     falsification.add_argument("--min-hit-rate-edge", type=float, default=0.03)
 
+    nonlinear_beta = subparsers.add_parser("audit-nonlinear-commodity-beta")
+    nonlinear_beta.add_argument("--candidates", type=Path, required=True)
+    nonlinear_beta.add_argument("--equity-processed", type=Path, default=Path("data/processed/equity_processed.parquet"))
+    nonlinear_beta.add_argument("--commodity-signals", type=Path, default=Path("data/processed/commodity_signals.parquet"))
+    nonlinear_beta.add_argument("--exposure-map", type=Path, default=Path("config/commodity_exposure_map.csv"))
+    nonlinear_beta.add_argument("--output", type=Path, default=Path("data/processed/nonlinear_commodity_beta_audit.csv"))
+    nonlinear_beta.add_argument("--return-column", default="residual_return_mktsec_w12m")
+    nonlinear_beta.add_argument("--commodity-return-column", default="commodity_return_mktseccomm")
+    nonlinear_beta.add_argument("--commodity-signal-return-column", default="front_log_ret_1d")
+    nonlinear_beta.add_argument("--lag-days", action="append", type=int, default=None)
+    nonlinear_beta.add_argument("--min-observations", type=int, default=126)
+    nonlinear_beta.add_argument("--large-move-quantile", type=float, default=0.80)
+    nonlinear_beta.add_argument("--volatility-window", type=int, default=21)
+    nonlinear_beta.add_argument("--max-abs-lag-corr-threshold", type=float, default=0.15)
+    nonlinear_beta.add_argument("--asymmetry-corr-diff-threshold", type=float, default=0.15)
+
+    signal_decay = subparsers.add_parser("audit-signal-decay")
+    signal_decay.add_argument("--candidates", type=Path, required=True)
+    signal_decay.add_argument("--cache", type=Path, required=True)
+    signal_decay.add_argument("--commodity", default=None)
+    signal_decay.add_argument("--output", type=Path, default=Path("data/processed/signal_decay_audit.csv"))
+    signal_decay.add_argument("--detail-output", type=Path, default=Path("data/processed/signal_decay_audit_detail.csv"))
+    signal_decay.add_argument("--return-column", default="residual_return_mktsec_w12m")
+    signal_decay.add_argument("--horizon", action="append", type=int, default=None)
+    signal_decay.add_argument("--activation-z", type=float, default=1.5)
+    signal_decay.add_argument("--min-event-count", type=int, default=20)
+    signal_decay.add_argument("--min-sign-stability", type=float, default=0.67)
+
+
+
+
+    peer_expansion = subparsers.add_parser("expand-candidate-peers")
+    peer_expansion.add_argument("--candidates", type=Path, required=True)
+    peer_expansion.add_argument("--selected-features", type=Path, required=True)
+    peer_expansion.add_argument("--cache", type=Path, required=True)
+    peer_expansion.add_argument("--commodity", default=None)
+    peer_expansion.add_argument("--output", type=Path, default=Path("data/processed/peer_expansion.csv"))
+    peer_expansion.add_argument("--return-column", default="residual_return_mktsec_w12m")
+    peer_expansion.add_argument("--activation-z", type=float, default=1.5)
+    peer_expansion.add_argument("--min-peer-nonoverlap-abs-t", type=float, default=1.0)
+    peer_expansion.add_argument("--min-peer-events", type=int, default=10)
+    peer_expansion.add_argument("--min-peer-event-sum", type=float, default=0.0)
+    macro_regime = subparsers.add_parser("build-macro-regime-signals")
+    macro_regime.add_argument("--raw-dir", type=Path, default=Path("data/macro/raw"))
+    macro_regime.add_argument("--output", type=Path, default=Path("data/processed/macro_regime.parquet"))
+    year_stability = subparsers.add_parser("audit-year-stability")
+    year_stability.add_argument("--candidates", type=Path, required=True)
+    year_stability.add_argument("--cache", type=Path, required=True)
+    year_stability.add_argument("--commodity", default=None)
+    year_stability.add_argument("--output", type=Path, default=Path("data/processed/year_stability_audit.csv"))
+    year_stability.add_argument(
+        "--detail-output",
+        type=Path,
+        default=Path("data/processed/year_stability_audit_detail.csv"),
+    )
+    year_stability.add_argument("--return-column", default="residual_return_mktsec_w12m")
+    year_stability.add_argument("--horizon", type=int, default=21)
+    year_stability.add_argument("--activation-z", type=float, default=1.5)
+    year_stability.add_argument("--min-event-count", type=int, default=20)
+    year_stability.add_argument("--max-concentration", type=float, default=0.30)
+    year_stability.add_argument("--min-loyo-abs-t", type=float, default=1.5)
+    regime_validity = subparsers.add_parser("audit-regime-conditioned-validity")
+    regime_validity.add_argument("--candidates", type=Path, required=True)
+    regime_validity.add_argument("--cache", type=Path, required=True)
+    regime_validity.add_argument(
+        "--commodity-signals",
+        type=Path,
+        default=Path("data/processed/commodity_signals.parquet"),
+    )
+    regime_validity.add_argument("--commodity", default=None)
+    regime_validity.add_argument("--output", type=Path, default=Path("data/processed/regime_validity_audit.csv"))
+    regime_validity.add_argument(
+        "--detail-output",
+        type=Path,
+        default=Path("data/processed/regime_validity_audit_detail.csv"),
+    )
+    regime_validity.add_argument("--return-column", default="residual_return_mktsec_w12m")
+    regime_validity.add_argument("--horizon", action="append", type=int, default=None)
+    regime_validity.add_argument("--activation-z", type=float, default=1.5)
+    regime_validity.add_argument(
+        "--regime-dimension",
+        action="append",
+        choices=DEFAULT_REGIME_DIMENSIONS,
+        default=None,
+    )
+    regime_validity.add_argument("--min-regime-event-count", type=int, default=20)
+    regime_validity.add_argument("--min-positive-regime-share", type=float, default=0.67)
+    regime_validity.add_argument("--max-dominant-regime-event-share", type=float, default=0.70)
+    regime_validity.add_argument("--min-effective-regime-count", type=float, default=1.5)
+    regime_validity.add_argument("--curve-z-threshold", type=float, default=1.0)
+    regime_validity.add_argument("--price-share-threshold", type=float, default=0.6)
+    regime_validity.add_argument("--vol-z-threshold", type=float, default=1.0)
+    regime_validity.add_argument("--momentum-z-threshold", type=float, default=1.0)
+    regime_validity.add_argument("--macro-regime", type=Path, default=None)
+
+    regime_adversarial = subparsers.add_parser("audit-regime-adversarial")
+    regime_adversarial.add_argument("--candidates", type=Path, required=True)
+    regime_adversarial.add_argument("--cache", type=Path, required=True)
+    regime_adversarial.add_argument(
+        "--commodity-signals",
+        type=Path,
+        default=Path("data/processed/commodity_signals.parquet"),
+    )
+    regime_adversarial.add_argument("--commodity", default=None)
+    regime_adversarial.add_argument("--output", type=Path, default=Path("data/processed/regime_adversarial_audit.csv"))
+    regime_adversarial.add_argument(
+        "--detail-output",
+        type=Path,
+        default=Path("data/processed/regime_adversarial_audit_detail.csv"),
+    )
+    regime_adversarial.add_argument("--return-column", default="residual_return_mktsec_w12m")
+    regime_adversarial.add_argument("--horizon", action="append", type=int, default=None)
+    regime_adversarial.add_argument("--activation-z", type=float, default=1.5)
+    regime_adversarial.add_argument(
+        "--regime-dimension",
+        action="append",
+        choices=DEFAULT_REGIME_DIMENSIONS,
+        default=None,
+    )
+    regime_adversarial.add_argument("--min-removed-event-count", type=int, default=20)
+    regime_adversarial.add_argument("--min-holdout-event-count", type=int, default=40)
+    regime_adversarial.add_argument("--max-removed-event-share", type=float, default=0.60)
+    regime_adversarial.add_argument("--max-mean-drop-ratio", type=float, default=0.50)
+    regime_adversarial.add_argument("--curve-z-threshold", type=float, default=1.0)
+    regime_adversarial.add_argument("--price-share-threshold", type=float, default=0.6)
+    regime_adversarial.add_argument("--vol-z-threshold", type=float, default=1.0)
+    regime_adversarial.add_argument("--momentum-z-threshold", type=float, default=1.0)
+    regime_adversarial.add_argument("--macro-regime", type=Path, default=None)
+
+    basket_regime_adversarial = subparsers.add_parser("audit-basket-regime-adversarial")
+    basket_regime_adversarial.add_argument("--candidates", type=Path, required=True)
+    basket_regime_adversarial.add_argument("--cache", type=Path, required=True)
+    basket_regime_adversarial.add_argument(
+        "--commodity-signals",
+        type=Path,
+        default=Path("data/processed/commodity_signals.parquet"),
+    )
+    basket_regime_adversarial.add_argument("--commodity", default=None)
+    basket_regime_adversarial.add_argument(
+        "--output",
+        type=Path,
+        default=Path("data/processed/basket_regime_adversarial_audit.csv"),
+    )
+    basket_regime_adversarial.add_argument(
+        "--events-output",
+        type=Path,
+        default=Path("data/processed/basket_regime_adversarial_events.csv"),
+    )
+    basket_regime_adversarial.add_argument("--return-column", default="residual_return_mktsec_w12m")
+    basket_regime_adversarial.add_argument("--horizon", type=int, default=42)
+    basket_regime_adversarial.add_argument("--activation-z", type=float, default=1.5)
+    basket_regime_adversarial.add_argument(
+        "--regime-dimension",
+        action="append",
+        choices=DEFAULT_REGIME_DIMENSIONS,
+        default=None,
+    )
+    basket_regime_adversarial.add_argument("--min-removed-event-count", type=int, default=20)
+    basket_regime_adversarial.add_argument("--min-holdout-event-count", type=int, default=40)
+    basket_regime_adversarial.add_argument("--max-removed-event-share", type=float, default=0.60)
+    basket_regime_adversarial.add_argument("--max-mean-drop-ratio", type=float, default=0.50)
+    basket_regime_adversarial.add_argument("--curve-z-threshold", type=float, default=1.0)
+    basket_regime_adversarial.add_argument("--price-share-threshold", type=float, default=0.6)
+    basket_regime_adversarial.add_argument("--vol-z-threshold", type=float, default=1.0)
+    basket_regime_adversarial.add_argument("--momentum-z-threshold", type=float, default=1.0)
+
+    basket_state_filter = subparsers.add_parser("audit-basket-state-filter")
+    basket_state_filter.add_argument("--events", type=Path, required=True)
+    basket_state_filter.add_argument("--output", type=Path, default=Path("data/processed/basket_state_filter_audit.csv"))
+    basket_state_filter.add_argument("--regime-dimension", default="vol_regime")
+    basket_state_filter.add_argument("--horizon", type=int, default=42)
+    basket_state_filter.add_argument("--min-nonoverlap-events", type=int, default=5)
+    basket_state_filter.add_argument("--min-nonoverlap-t-stat", type=float, default=1.5)
+
     taxonomy_audit = subparsers.add_parser("audit-exposure-taxonomy")
     taxonomy_audit.add_argument("--exposure-map", type=Path, default=Path("config/commodity_exposure_map.csv"))
     taxonomy_audit.add_argument("--role-taxonomy", type=Path, default=Path("config/commodity_role_taxonomy.csv"))
@@ -471,7 +754,10 @@ def build_parser() -> argparse.ArgumentParser:
     candidate_taxonomy.add_argument("--candidates", type=Path, required=True)
     candidate_taxonomy.add_argument("--exposure-map", type=Path, default=Path("config/commodity_exposure_map.csv"))
     candidate_taxonomy.add_argument("--role-taxonomy", type=Path, default=Path("config/commodity_role_taxonomy.csv"))
+    candidate_taxonomy.add_argument("--mechanism-alignment", type=Path, default=None)
     candidate_taxonomy.add_argument("--output", type=Path, default=Path("data/processed/candidate_taxonomy_review.csv"))
+    candidate_taxonomy.add_argument("--min-mechanism-alignment-probability", type=float, default=0.67)
+    candidate_taxonomy.add_argument("--mechanism-review-band", type=float, default=0.55)
 
     turnover = subparsers.add_parser("study-registry-turnover")
     turnover.add_argument("--registry", action="append", type=Path, default=None)
@@ -502,9 +788,14 @@ def build_parser() -> argparse.ArgumentParser:
     consolidate.add_argument("--candidates", type=Path, default=Path("data/processed/candidate_signals.csv"))
     consolidate.add_argument("--forecast-audit", type=Path, default=Path("data/processed/forecast_signal_audit.csv"))
     consolidate.add_argument("--reviewed-features", type=Path, default=Path("config/reviewed_commodity_features.csv"))
+    consolidate.add_argument("--mechanism-alignment", type=Path, default=None)
     consolidate.add_argument("--output", type=Path, default=Path("data/processed/consolidated_candidate_signals.csv"))
     consolidate.add_argument("--min-confidence", choices=["low", "medium", "high"], default="medium")
     consolidate.add_argument("--require-audit-candidate", action="store_true")
+    consolidate.add_argument("--require-mechanism-pass", action="store_true")
+    consolidate.add_argument("--block-mechanism-conflicts", action="store_true")
+    consolidate.add_argument("--min-mechanism-alignment-probability", type=float, default=0.67)
+    consolidate.add_argument("--mechanism-review-band", type=float, default=0.55)
     consolidate.add_argument("--min-same-direction-share", type=float, default=0.6)
     consolidate.add_argument("--min-peer-direction-share", type=float, default=0.0)
     consolidate.add_argument("--max-per-ticker", type=int, default=3)
@@ -771,12 +1062,77 @@ def build_parser() -> argparse.ArgumentParser:
     commodity_research.add_argument("--output-dir", type=Path, default=None)
     commodity_research.add_argument("--quarter", action="append", default=None)
     commodity_research.add_argument("--include-unreviewed-features", action="store_true")
+    commodity_research.add_argument("--target-return-column", default="residual_return_mktsec_w12m")
+    commodity_research.add_argument("--diagnostic-target-return-column", default="residual_return_mktseccomm_w12m")
     commodity_research.add_argument("--min-abs-t", type=float, default=2.0)
     commodity_research.add_argument("--min-nonoverlap-abs-t", type=float, default=1.0)
     commodity_research.add_argument("--min-effective-observations", type=int, default=20)
     commodity_research.add_argument("--min-hit-rate-edge", type=float, default=0.03)
     commodity_research.add_argument("--min-sign-stability", type=float, default=0.5)
     commodity_research.add_argument("--commodity-neutral-min-ratio", type=float, default=0.5)
+    commodity_research.add_argument("--verbose", action="store_true")
+    commodity_research.add_argument("--progress-interval", type=int, default=10)
+
+    curve_first = subparsers.add_parser("select-curve-first-candidates")
+    curve_first.add_argument("--commodity", required=True)
+    curve_first.add_argument("--matrix-dir", type=Path, required=True)
+    curve_first.add_argument("--cache", type=Path, required=True)
+    curve_first.add_argument("--output", type=Path, required=True)
+    curve_first.add_argument("--selected-output", type=Path, default=None)
+    curve_first.add_argument("--quarter", action="append", default=None)
+    curve_first.add_argument("--lookback-years", action="append", type=int, default=None)
+    curve_first.add_argument("--target-return-column", default="residual_return_mktsec_w12m")
+    curve_first.add_argument("--activation-z", type=float, default=1.5)
+    curve_first.add_argument(
+        "--allowed-state",
+        action="append",
+        default=None,
+        help="Allowed state_hypothesis. Defaults to curve_tightness and curve_tightness_change.",
+    )
+    curve_first.add_argument("--min-nonoverlap-abs-t", type=float, default=1.0)
+    curve_first.add_argument("--min-effective-observations", type=int, default=20)
+    curve_first.add_argument("--min-robust-calmar", type=float, default=0.5)
+    curve_first.add_argument("--max-dominant-year-share", type=float, default=0.5)
+    curve_first.add_argument("--max-candidates", type=int, default=None)
+
+    curve_first_taxonomy = subparsers.add_parser("review-curve-first-taxonomy")
+    curve_first_taxonomy.add_argument("--candidates", type=Path, required=True)
+    curve_first_taxonomy.add_argument("--exposure-map", type=Path, default=Path("config/commodity_exposure_map.csv"))
+    curve_first_taxonomy.add_argument("--role-taxonomy", type=Path, default=Path("config/commodity_role_taxonomy.csv"))
+    curve_first_taxonomy.add_argument("--output", type=Path, required=True)
+    curve_first_taxonomy.add_argument("--block-low-priority", action="store_true")
+
+    curve_first_oos = subparsers.add_parser("run-curve-first-oos")
+    curve_first_oos.add_argument("--taxonomy", action="append", type=Path, required=True)
+    curve_first_oos.add_argument("--cache", type=Path, required=True)
+    curve_first_oos.add_argument("--events-output", type=Path, required=True)
+    curve_first_oos.add_argument("--daily-output", type=Path, required=True)
+    curve_first_oos.add_argument("--summary-output", type=Path, required=True)
+    curve_first_oos.add_argument("--verdict", action="append", default=None)
+    curve_first_oos.add_argument("--return-column", action="append", default=None)
+    curve_first_oos.add_argument("--activation-z", type=float, default=1.5)
+    curve_first_oos.add_argument("--weighting", choices=["equal"], default="equal")
+    curve_first_oos.add_argument("--no-collapse-same-ticker-state", action="store_true")
+    curve_first_oos.add_argument("--oos-mode", choices=["next-quarter", "year-remainder"], default="next-quarter")
+    curve_first_oos.add_argument("--oos-end-quarter", default=None)
+
+    cross_summary = subparsers.add_parser("summarize-cross-product-clusters")
+    cross_summary.add_argument("--commodity", default="CL")
+    cross_summary.add_argument("--trigger-role-results", type=Path, default=None)
+    cross_summary.add_argument("--output", type=Path, default=None)
+    cross_summary.add_argument("--detail-output", type=Path, default=None)
+    cross_summary.add_argument("--min-keep-count", type=int, default=5)
+    cross_summary.add_argument("--top", type=int, default=50)
+    cross_summary.add_argument("--exclude-role", action="append", default=None)
+    cross_summary.add_argument("--include-direct-oil-roles", action="store_true")
+
+    state_summary = subparsers.add_parser("summarize-state-role-clusters")
+    state_summary.add_argument("--candidates", type=Path, required=True)
+    state_summary.add_argument("--output", type=Path, required=True)
+    state_summary.add_argument("--detail-output", type=Path, required=True)
+    state_summary.add_argument("--min-keep-count", type=int, default=5)
+    state_summary.add_argument("--keep-only", action="store_true")
+    state_summary.add_argument("--top", type=int, default=50)
 
     return parser
 
@@ -964,6 +1320,7 @@ def main() -> None:
             commodity=commodity_code,
             lookback_years=args.lookback_years,
             horizons=args.horizon,
+            target_return_columns=args.target_return_column,
             start=args.start,
             end=args.end,
             min_observations=args.min_observations,
@@ -1008,6 +1365,130 @@ def main() -> None:
             f"Wrote {len(pair):,} eligibility rows, {len(events):,} events, "
             f"{len(stock_daily):,} stock daily rows, and {len(portfolio_daily):,} portfolio daily rows "
             f"to {args.output_dir / commodity_code}"
+        )
+        return
+
+    if args.command == "simulate-selection-path":
+        commodity_code = args.commodity.upper().strip()
+        matrix_dir = args.matrix_dir or Path(f"data/matrix/{commodity_code}")
+        feature_set = "__".join(feature.replace("/", "_").replace(" ", "_") for feature in args.feature)
+        output_pairs = args.output_pairs or Path(
+            f"data/processed/{commodity_code}-{feature_set}-selection_path_pairs.csv"
+        )
+        output_baskets = args.output_baskets or Path(
+            f"data/processed/{commodity_code}-{feature_set}-selection_path_baskets.csv"
+        )
+        pairs, baskets = simulate_selection_path_stability_from_paths(
+            matrix_dir=matrix_dir,
+            output_pairs_path=output_pairs,
+            output_baskets_path=output_baskets,
+            commodity=commodity_code,
+            feature=args.feature,
+            tickers=args.ticker,
+            target_return_column=args.target_return_column,
+            horizon_days=args.horizon_days,
+            lookback_years=args.lookback_years,
+            min_nonoverlap_abs_t_stat=args.min_nonoverlap_abs_t_stat,
+            min_effective_observations=args.min_effective_observations,
+            min_selected_lookbacks=args.min_selected_lookbacks,
+            min_direction_share=args.min_direction_share,
+            min_pairs=args.min_pairs,
+            basket_scope=args.basket_scope,
+            simulations=args.simulations,
+            t_stat_noise=args.t_stat_noise,
+            random_seed=args.random_seed,
+        )
+        pair_counts = pairs["path_stability_verdict"].value_counts().to_dict() if not pairs.empty else {}
+        basket_counts = baskets["basket_path_verdict"].value_counts().to_dict() if not baskets.empty else {}
+        print(
+            f"Wrote {len(pairs):,} selection path pair rows to {output_pairs} "
+            f"and {len(baskets):,} basket rows to {output_baskets}; "
+            f"pair verdicts: {pair_counts}; basket verdicts: {basket_counts}"
+        )
+        return
+
+    if args.command == "build-mechanism-state-model":
+        role_states, ticker_detail = build_mechanism_state_model_from_paths(
+            commodity_signals_path=args.commodity_signals,
+            exposure_map_path=args.exposure_map,
+            role_taxonomy_path=args.role_taxonomy,
+            output_path=args.output,
+            ticker_output_path=args.ticker_output,
+            commodity=args.commodity,
+            as_of_date=args.as_of_date,
+            curve_z_threshold=args.curve_z_threshold,
+            momentum_z_threshold=args.momentum_z_threshold,
+            price_regime_share_threshold=args.price_regime_share_threshold,
+            vol_z_threshold=args.vol_z_threshold,
+            participation_z_threshold=args.participation_z_threshold,
+            min_spread_abs=args.min_spread_abs,
+            min_spread_chg_abs=args.min_spread_chg_abs,
+            min_role_tickers=args.min_role_tickers,
+        )
+        counts = (
+            role_states["mechanism_verdict"].value_counts().to_dict()
+            if "mechanism_verdict" in role_states
+            else {}
+        )
+        print(
+            f"Wrote {len(role_states):,} mechanism state-role rows to {args.output} "
+            f"and {len(ticker_detail):,} ticker rows to {args.ticker_output}; verdicts: {counts}"
+        )
+        return
+
+    if args.command == "audit-mechanism-alignment":
+        commodity_code = args.commodity.upper().strip()
+        matrix_dir = args.matrix_dir or Path(f"data/matrix/{commodity_code}")
+        summary, detail = build_mechanism_alignment_audit_from_paths(
+            mechanism_tickers_path=args.mechanism_tickers,
+            matrix_dir=matrix_dir,
+            output_path=args.output,
+            detail_output_path=args.detail_output,
+            commodity=commodity_code,
+            target_return_column=args.target_return_column,
+            horizon_days=args.horizon_days,
+            lookback_years=args.lookback_years,
+            min_alignment_probability=args.min_alignment_probability,
+            review_band=args.review_band,
+        )
+        counts = (
+            summary["mechanism_alignment_verdict"].value_counts().to_dict()
+            if "mechanism_alignment_verdict" in summary
+            else {}
+        )
+        print(
+            f"Wrote {len(summary):,} mechanism alignment rows to {args.output} "
+            f"and {len(detail):,} detail rows to {args.detail_output}; verdicts: {counts}"
+        )
+        return
+
+    if args.command == "audit-basket-cluster-risk":
+        summary, detail = build_basket_cluster_risk_audit_from_paths(
+            selection_pairs_path=args.selection_pairs,
+            exposure_map_path=args.exposure_map,
+            candidates_path=args.candidates,
+            output_path=args.output,
+            detail_output_path=args.detail_output,
+            min_selection_probability=args.min_selection_probability,
+            max_direction_flip_probability=args.max_direction_flip_probability,
+            min_tickers=args.min_tickers,
+            min_roles=args.min_roles,
+            min_effective_tickers=args.min_effective_tickers,
+            min_effective_roles=args.min_effective_roles,
+            max_ticker_share=args.max_ticker_share,
+            max_role_share=args.max_role_share,
+            max_unknown_role_share=args.max_unknown_role_share,
+            group_by_feature=args.group_by_feature,
+            macro_regime_review=not args.allow_macro_regime,
+        )
+        counts = (
+            summary["basket_cluster_verdict"].value_counts().to_dict()
+            if "basket_cluster_verdict" in summary
+            else {}
+        )
+        print(
+            f"Wrote {len(summary):,} basket cluster risk rows to {args.output} "
+            f"and {len(detail):,} detail rows to {args.detail_output}; verdicts: {counts}"
         )
         return
 
@@ -1232,6 +1713,7 @@ def main() -> None:
             commodity_beta_symbols=commodity_beta_symbols,
             commodity_return_column=args.commodity_return_column,
             include_commodity_beta_residuals=not args.skip_commodity_beta_residuals,
+            progress=not args.quiet,
         )
         print(f"Wrote {len(dataset):,} processed equity rows to {args.output}")
         return
@@ -1321,6 +1803,216 @@ def main() -> None:
         print(f"Wrote {len(audit):,} sensitivity falsification audit rows to {args.output}")
         return
 
+    if args.command == "audit-nonlinear-commodity-beta":
+        audit = audit_nonlinear_commodity_beta_from_paths(
+            candidates_path=args.candidates,
+            equity_processed_path=args.equity_processed,
+            commodity_signals_path=args.commodity_signals,
+            exposure_map_path=args.exposure_map,
+            output_path=args.output,
+            return_column=args.return_column,
+            commodity_return_column=args.commodity_return_column,
+            commodity_signal_return_column=args.commodity_signal_return_column,
+            lag_days=args.lag_days or [0, 1, 5, 10, 21],
+            min_observations=args.min_observations,
+            large_move_quantile=args.large_move_quantile,
+            volatility_window=args.volatility_window,
+            max_abs_lag_corr_threshold=args.max_abs_lag_corr_threshold,
+            asymmetry_corr_diff_threshold=args.asymmetry_corr_diff_threshold,
+        )
+        counts = (
+            audit["nonlinear_beta_verdict"].value_counts().to_dict()
+            if "nonlinear_beta_verdict" in audit
+            else {}
+        )
+        print(f"Wrote {len(audit):,} nonlinear commodity beta audit rows to {args.output}; verdicts: {counts}")
+        return
+
+    if args.command == "audit-signal-decay":
+        summary, detail = build_signal_decay_audit_from_paths(
+            candidates_path=args.candidates,
+            cache_path=args.cache,
+            output_path=args.output,
+            detail_output_path=args.detail_output,
+            commodity=args.commodity,
+            return_column=args.return_column,
+            horizons=args.horizon,
+            activation_z=args.activation_z,
+            min_event_count=args.min_event_count,
+            min_sign_stability=args.min_sign_stability,
+        )
+        counts = summary["decay_verdict"].value_counts().to_dict() if "decay_verdict" in summary else {}
+        print(
+            f"Wrote {len(summary):,} signal decay rows to {args.output} "
+            f"and {len(detail):,} detail rows to {args.detail_output}; verdicts: {counts}"
+        )
+        return
+
+
+
+    if args.command == "expand-candidate-peers":
+        peers = build_peer_expansion_from_paths(
+            candidates_path=args.candidates,
+            selected_features_path=args.selected_features,
+            cache_path=args.cache,
+            output_path=args.output,
+            commodity=args.commodity,
+            return_column=args.return_column,
+            activation_z=args.activation_z,
+            min_peer_nonoverlap_abs_t=args.min_peer_nonoverlap_abs_t,
+            min_peer_events=args.min_peer_events,
+            min_peer_event_sum=args.min_peer_event_sum,
+        )
+        if peers.empty:
+            print("No qualified peers found.")
+        else:
+            groups = peers["peer_group_primaries"].nunique()
+            print(f"Wrote {len(peers):,} peer-expanded candidates across {groups} peer groups to {args.output}")
+            print(peers[["ticker","feature","peer_group_primaries","events","event_t_stat"]].to_string(index=False))
+        return
+    if args.command == "build-macro-regime-signals":
+        frame = build_macro_regime_frame_from_paths(
+            raw_dir=args.raw_dir,
+            output_path=args.output,
+        )
+        regime_cols = ["vix_regime", "dxy_regime", "us10y_regime", "ovx_regime"]
+        for col in regime_cols:
+            if col in frame.columns:
+                print(f"  {col}: {dict(frame[col].value_counts().to_dict())}")
+        print(f"Wrote {len(frame):,} macro regime rows to {args.output}")
+        return
+    if args.command == "audit-year-stability":
+        summary, detail = build_year_stability_audit_from_paths(
+            candidates_path=args.candidates,
+            cache_path=args.cache,
+            output_path=args.output,
+            detail_output_path=args.detail_output,
+            commodity=args.commodity,
+            return_column=args.return_column,
+            horizon=args.horizon,
+            activation_z=args.activation_z,
+            min_event_count=args.min_event_count,
+            max_concentration=args.max_concentration,
+            min_loyo_abs_t=args.min_loyo_abs_t,
+        )
+        counts = summary["year_stability_verdict"].value_counts().to_dict() if "year_stability_verdict" in summary else {}
+        print(
+            f"Wrote {len(summary):,} year stability rows to {args.output} "
+            f"and {len(detail):,} detail rows to {args.detail_output}; verdicts: {counts}"
+        )
+        return
+
+    if args.command == "audit-regime-conditioned-validity":
+        summary, detail = build_regime_conditioned_validity_audit_from_paths(
+            candidates_path=args.candidates,
+            cache_path=args.cache,
+            commodity_signals_path=args.commodity_signals,
+            output_path=args.output,
+            detail_output_path=args.detail_output,
+            commodity=args.commodity,
+            return_column=args.return_column,
+            horizons=args.horizon,
+            activation_z=args.activation_z,
+            regime_dimensions=args.regime_dimension,
+            min_regime_event_count=args.min_regime_event_count,
+            min_positive_regime_share=args.min_positive_regime_share,
+            max_dominant_regime_event_share=args.max_dominant_regime_event_share,
+            min_effective_regime_count=args.min_effective_regime_count,
+            curve_z_threshold=args.curve_z_threshold,
+            price_share_threshold=args.price_share_threshold,
+            vol_z_threshold=args.vol_z_threshold,
+            momentum_z_threshold=args.momentum_z_threshold,
+            macro_regime_path=args.macro_regime,
+        )
+        counts = (
+            summary["regime_validity_verdict"].value_counts().to_dict()
+            if "regime_validity_verdict" in summary
+            else {}
+        )
+        print(
+            f"Wrote {len(summary):,} regime validity rows to {args.output} "
+            f"and {len(detail):,} detail rows to {args.detail_output}; verdicts: {counts}"
+        )
+        return
+
+    if args.command == "audit-regime-adversarial":
+        summary, detail = build_regime_adversarial_audit_from_paths(
+            candidates_path=args.candidates,
+            cache_path=args.cache,
+            commodity_signals_path=args.commodity_signals,
+            output_path=args.output,
+            detail_output_path=args.detail_output,
+            commodity=args.commodity,
+            return_column=args.return_column,
+            horizons=args.horizon,
+            activation_z=args.activation_z,
+            regime_dimensions=args.regime_dimension,
+            min_removed_event_count=args.min_removed_event_count,
+            min_holdout_event_count=args.min_holdout_event_count,
+            max_removed_event_share=args.max_removed_event_share,
+            max_mean_drop_ratio=args.max_mean_drop_ratio,
+            curve_z_threshold=args.curve_z_threshold,
+            price_share_threshold=args.price_share_threshold,
+            vol_z_threshold=args.vol_z_threshold,
+            momentum_z_threshold=args.momentum_z_threshold,
+            macro_regime_path=args.macro_regime,
+        )
+        counts = (
+            summary["adversarial_verdict"].value_counts().to_dict()
+            if "adversarial_verdict" in summary
+            else {}
+        )
+        print(
+            f"Wrote {len(summary):,} regime adversarial rows to {args.output} "
+            f"and {len(detail):,} detail rows to {args.detail_output}; verdicts: {counts}"
+        )
+        return
+
+    if args.command == "audit-basket-regime-adversarial":
+        summary, events = build_basket_regime_adversarial_audit_from_paths(
+            candidates_path=args.candidates,
+            cache_path=args.cache,
+            commodity_signals_path=args.commodity_signals,
+            output_path=args.output,
+            events_output_path=args.events_output,
+            commodity=args.commodity,
+            return_column=args.return_column,
+            horizon=args.horizon,
+            activation_z=args.activation_z,
+            regime_dimensions=args.regime_dimension,
+            min_removed_event_count=args.min_removed_event_count,
+            min_holdout_event_count=args.min_holdout_event_count,
+            max_removed_event_share=args.max_removed_event_share,
+            max_mean_drop_ratio=args.max_mean_drop_ratio,
+            curve_z_threshold=args.curve_z_threshold,
+            price_share_threshold=args.price_share_threshold,
+            vol_z_threshold=args.vol_z_threshold,
+            momentum_z_threshold=args.momentum_z_threshold,
+        )
+        counts = (
+            summary["adversarial_verdict"].value_counts().to_dict()
+            if "adversarial_verdict" in summary
+            else {}
+        )
+        print(
+            f"Wrote {len(summary):,} basket regime adversarial rows to {args.output} "
+            f"and {len(events):,} basket event days to {args.events_output}; verdicts: {counts}"
+        )
+        return
+
+    if args.command == "audit-basket-state-filter":
+        audit = build_basket_state_filter_audit_from_paths(
+            events_path=args.events,
+            output_path=args.output,
+            regime_dimension=args.regime_dimension,
+            horizon=args.horizon,
+            min_nonoverlap_events=args.min_nonoverlap_events,
+            min_nonoverlap_t_stat=args.min_nonoverlap_t_stat,
+        )
+        counts = audit["filter_verdict"].value_counts().to_dict() if "filter_verdict" in audit else {}
+        print(f"Wrote {len(audit):,} basket state-filter rows to {args.output}; verdicts: {counts}")
+        return
+
     if args.command == "audit-exposure-taxonomy":
         summary, unmapped = audit_exposure_taxonomy_from_paths(
             exposure_map_path=args.exposure_map,
@@ -1341,9 +2033,20 @@ def main() -> None:
             exposure_map_path=args.exposure_map,
             role_taxonomy_path=args.role_taxonomy,
             output_path=args.output,
+            mechanism_alignment_path=args.mechanism_alignment,
+            min_mechanism_alignment_probability=args.min_mechanism_alignment_probability,
+            mechanism_review_band=args.mechanism_review_band,
         )
-        counts = review["taxonomy_verdict"].value_counts().to_dict() if "taxonomy_verdict" in review else {}
-        print(f"Wrote {len(review):,} candidate taxonomy review rows to {args.output}; verdicts: {counts}")
+        taxonomy_counts = review["taxonomy_verdict"].value_counts().to_dict() if "taxonomy_verdict" in review else {}
+        gate_counts = (
+            review["candidate_gate_verdict"].value_counts().to_dict()
+            if "candidate_gate_verdict" in review
+            else {}
+        )
+        print(
+            f"Wrote {len(review):,} candidate taxonomy review rows to {args.output}; "
+            f"taxonomy verdicts: {taxonomy_counts}; candidate gate verdicts: {gate_counts}"
+        )
         return
 
     if args.command == "study-registry-turnover":
@@ -1383,9 +2086,14 @@ def main() -> None:
             candidates_path=args.candidates,
             forecast_audit_path=args.forecast_audit,
             reviewed_features_path=args.reviewed_features,
+            mechanism_alignment_path=args.mechanism_alignment,
             output_path=args.output,
             min_confidence=args.min_confidence,
             require_audit_candidate=args.require_audit_candidate,
+            require_mechanism_pass=args.require_mechanism_pass,
+            block_mechanism_conflicts=args.block_mechanism_conflicts,
+            min_mechanism_alignment_probability=args.min_mechanism_alignment_probability,
+            mechanism_review_band=args.mechanism_review_band,
             min_same_direction_share=args.min_same_direction_share,
             min_peer_direction_share=args.min_peer_direction_share,
             max_per_ticker=args.max_per_ticker,
@@ -1598,12 +2306,16 @@ def main() -> None:
             output_dir=output_dir,
             quarters=args.quarter,
             include_unreviewed_features=args.include_unreviewed_features,
+            target_return_column=args.target_return_column,
+            diagnostic_target_return_column=args.diagnostic_target_return_column,
             min_abs_t=args.min_abs_t,
             min_nonoverlap_abs_t=args.min_nonoverlap_abs_t,
             min_effective_observations=args.min_effective_observations,
             min_hit_rate_edge=args.min_hit_rate_edge,
             min_sign_stability=args.min_sign_stability,
             commodity_neutral_min_ratio=args.commodity_neutral_min_ratio,
+            verbose=args.verbose,
+            progress_interval=args.progress_interval,
         )
         verdicts = (
             candidate_scores["selection_verdict"].value_counts().to_dict()
@@ -1615,6 +2327,172 @@ def main() -> None:
             f"selected: {len(selected):,}, blocked: {len(blocked):,}, "
             f"trigger-role rows: {len(role_results):,}, verdicts: {verdicts}"
         )
+        return
+
+    if args.command == "select-curve-first-candidates":
+        commodity_code = args.commodity.upper().strip()
+        selected_output = args.selected_output or args.output.with_name(
+            f"{args.output.stem}-selected{args.output.suffix}"
+        )
+        scored, selected = select_curve_first_candidates_from_paths(
+            matrix_dir=args.matrix_dir,
+            cache_path=args.cache,
+            output_path=args.output,
+            selected_output_path=selected_output,
+            commodity=commodity_code,
+            quarters=args.quarter,
+            lookback_years=args.lookback_years,
+            target_return_column=args.target_return_column,
+            activation_z=args.activation_z,
+            allowed_states=args.allowed_state,
+            min_nonoverlap_abs_t=args.min_nonoverlap_abs_t,
+            min_effective_observations=args.min_effective_observations,
+            min_robust_calmar=args.min_robust_calmar,
+            max_dominant_year_share=args.max_dominant_year_share,
+            max_candidates=args.max_candidates,
+        )
+        verdicts = (
+            scored["v3_selected"].value_counts(dropna=False).to_dict()
+            if "v3_selected" in scored
+            else {}
+        )
+        print(
+            f"Wrote {len(scored):,} curve-first scored rows to {args.output}; "
+            f"selected {len(selected):,} rows to {selected_output}; verdicts: {verdicts}"
+        )
+        return
+
+    if args.command == "review-curve-first-taxonomy":
+        reviewed = review_curve_first_taxonomy_from_paths(
+            candidates_path=args.candidates,
+            exposure_map_path=args.exposure_map,
+            role_taxonomy_path=args.role_taxonomy,
+            output_path=args.output,
+            block_low_priority=args.block_low_priority,
+        )
+        counts = (
+            reviewed["v3_taxonomy_verdict"].value_counts(dropna=False).to_dict()
+            if "v3_taxonomy_verdict" in reviewed
+            else {}
+        )
+        print(f"Wrote {len(reviewed):,} curve-first taxonomy review rows to {args.output}; verdicts: {counts}")
+        return
+
+    if args.command == "run-curve-first-oos":
+        return_columns = args.return_column or [
+            "raw_return",
+            "residual_return_mktsec_w12m",
+            "residual_return_mktseccomm_w12m",
+        ]
+        verdicts = args.verdict or ["pass"]
+        events, daily, summary = run_curve_first_oos_from_paths(
+            taxonomy_paths=args.taxonomy,
+            cache_path=args.cache,
+            events_output_path=args.events_output,
+            daily_output_path=args.daily_output,
+            summary_output_path=args.summary_output,
+            verdicts=verdicts,
+            return_columns=return_columns,
+            activation_z=args.activation_z,
+            weighting=args.weighting,
+            collapse_same_ticker_state=not args.no_collapse_same_ticker_state,
+            oos_mode=args.oos_mode,
+            oos_end_quarter=args.oos_end_quarter,
+        )
+        print(
+            f"Wrote {len(events):,} OOS events to {args.events_output}, "
+            f"{len(daily):,} daily rows to {args.daily_output}, "
+            f"and {len(summary):,} summary rows to {args.summary_output}"
+        )
+        if not summary.empty:
+            show_cols = [
+                "oos_quarter",
+                "event_count",
+                "ticker_count",
+                "pnl__residual_return_mktsec_w12m_total_pnl",
+                "pnl__residual_return_mktsec_w12m_sharpe",
+                "pnl__residual_return_mktsec_w12m_calmar",
+                "pnl__residual_return_mktsec_w12m_max_drawdown",
+            ]
+            print(summary[[col for col in show_cols if col in summary.columns]].to_string(index=False))
+        return
+
+    if args.command == "summarize-cross-product-clusters":
+        commodity_code = args.commodity.upper().strip()
+        trigger_path = args.trigger_role_results or Path(
+            f"data/research/feature_selection/{commodity_code}/trigger_role_results.csv"
+        )
+        output_path = args.output or Path(f"data/research/feature_selection/{commodity_code}/cluster_summary.csv")
+        detail_output_path = args.detail_output or Path(
+            f"data/research/feature_selection/{commodity_code}/cross_product_cluster_detail.csv"
+        )
+        if args.include_direct_oil_roles:
+            excluded_roles = []
+        elif args.exclude_role is not None:
+            excluded_roles = args.exclude_role
+        else:
+            excluded_roles = list(DEFAULT_DIRECT_OIL_ROLES)
+        summary, detail = summarize_cross_product_clusters_from_paths(
+            trigger_role_results_path=trigger_path,
+            output_path=output_path,
+            detail_output_path=detail_output_path,
+            min_keep_count=args.min_keep_count,
+            excluded_roles=excluded_roles,
+        )
+        print(
+            f"Wrote {len(summary):,} cluster summary rows to {output_path} "
+            f"and {len(detail):,} cross-product detail rows to {detail_output_path}"
+        )
+        if not summary.empty:
+            print("\nTop cluster families:")
+            print(summary.head(args.top).to_string(index=False))
+        if not detail.empty:
+            print("\nTop cross-product clusters:")
+            detail_cols = [
+                "quarter",
+                "feature",
+                "feature_family",
+                "horizon_days",
+                "exposure_role",
+                "candidate_count",
+                "keep_count",
+                "median_selection_score",
+                "median_nonoverlap_abs_t_stat",
+                "dominant_direction",
+                "tickers",
+            ]
+            print(detail[[col for col in detail_cols if col in detail.columns]].head(args.top).to_string(index=False))
+        return
+
+    if args.command == "summarize-state-role-clusters":
+        summary, detail = summarize_state_role_clusters_from_paths(
+            candidates_path=args.candidates,
+            output_path=args.output,
+            detail_output_path=args.detail_output,
+            min_keep_count=args.min_keep_count,
+            include_weak_keep=not args.keep_only,
+        )
+        print(
+            f"Wrote {len(summary):,} state-role summary rows to {args.output} "
+            f"and {len(detail):,} detail rows to {args.detail_output}"
+        )
+        if not summary.empty:
+            print("\nTop state-role clusters:")
+            cols = [
+                "commodity",
+                "state_hypothesis",
+                "exposure_role",
+                "horizon_days",
+                "quarters",
+                "total_keep",
+                "median_feature_count",
+                "supporting_features",
+                "median_score",
+                "median_t",
+                "dominant_direction",
+                "tickers",
+            ]
+            print(summary[[col for col in cols if col in summary.columns]].head(args.top).to_string(index=False))
         return
 
     parser.error(f"Unknown command: {args.command}")

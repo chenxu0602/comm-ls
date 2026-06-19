@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from time import perf_counter
 
 import numpy as np
 import pandas as pd
@@ -55,7 +56,7 @@ DEFAULT_PROCESSED_BETA_VARIATIONS = {
     },
 }
 DEFAULT_PRIMARY_PROCESSED_BETA_VARIATION = "mktsec_w12m"
-DEFAULT_COMMODITY_BETA_SYMBOLS = ["CL", "HG", "GC", "SI", "LC", "IS", "PD", "PT"]
+DEFAULT_COMMODITY_BETA_SYMBOLS = ["CL", "HG", "GC", "SI", "LC", "IS", "PS", "PD", "PT"]
 DEFAULT_COMMODITY_BETA_RETURN_COLUMN = "front_log_ret_1d"
 
 
@@ -655,13 +656,27 @@ def build_equity_processed_dataset(
     commodity_beta_symbols: list[str] | None = None,
     commodity_return_column: str = DEFAULT_COMMODITY_BETA_RETURN_COLUMN,
     include_commodity_beta_residuals: bool = True,
+    progress: bool = False,
 ) -> pd.DataFrame:
+    started = perf_counter()
+
+    def log(message: str) -> None:
+        if progress:
+            elapsed = perf_counter() - started
+            print(f"[build-equity-processed {elapsed:7.1f}s] {message}", flush=True)
+
+    log(f"loading seed universe from {universe_path}")
     seed = load_seed_universe(universe_path)
+    log(f"loaded {len(seed):,} seed tickers; loading theme hedges from {theme_hedges_path}")
     theme_hedges = _load_theme_hedges(theme_hedges_path)
+    log(f"loaded {len(theme_hedges):,} theme hedges; loading prices from {prices_dir}")
     prices = load_price_directory(prices_dir)
+    price_tickers = prices["ticker"].nunique() if "ticker" in prices.columns else 0
+    log(f"loaded {len(prices):,} price rows across {price_tickers:,} tickers")
     price_col = _price_column(prices)
     matrix = _price_matrix(prices)
     daily_returns = np.log(matrix).diff()
+    log(f"built price matrix {matrix.shape[0]:,} dates x {matrix.shape[1]:,} tickers using {price_col}")
 
     market_ticker = market_ticker.upper().strip()
     beta_variations = beta_variations or list(DEFAULT_PROCESSED_BETA_VARIATIONS)
@@ -674,12 +689,18 @@ def build_equity_processed_dataset(
             {str(_variation_config(variation)["beta_return_frequency"]) for variation in beta_variations}
         )
     }
+    log(
+        "built beta return matrices for "
+        + ", ".join(f"{frequency}:{frame.shape[0]:,} rows" for frequency, frame in beta_return_matrices.items())
+    )
     commodity_beta_symbols = commodity_beta_symbols or DEFAULT_COMMODITY_BETA_SYMBOLS
     ticker_commodity = (
         _ticker_commodity_map(exposure_map_path, commodity_beta_symbols)
         if include_commodity_beta_residuals
         else {}
     )
+    if include_commodity_beta_residuals:
+        log(f"loaded commodity exposure map for {len(ticker_commodity):,} tickers")
     commodity_daily_returns = (
         _load_commodity_return_matrix(
             commodity_signals_path=commodity_signals_path,
@@ -690,6 +711,11 @@ def build_equity_processed_dataset(
         if include_commodity_beta_residuals
         else pd.DataFrame()
     )
+    if include_commodity_beta_residuals:
+        log(
+            "loaded daily commodity returns "
+            f"{commodity_daily_returns.shape[0]:,} dates x {commodity_daily_returns.shape[1]:,} symbols"
+        )
     commodity_beta_return_matrices = (
         {
             frequency: _load_commodity_return_matrix(
@@ -703,6 +729,14 @@ def build_equity_processed_dataset(
         if include_commodity_beta_residuals
         else {}
     )
+    if include_commodity_beta_residuals:
+        log(
+            "built commodity beta matrices for "
+            + ", ".join(
+                f"{frequency}:{frame.shape[0]:,} rows"
+                for frequency, frame in commodity_beta_return_matrices.items()
+            )
+        )
 
     required_hedges = {market_ticker, *theme_hedges.values()}
     missing = sorted(ticker for ticker in required_hedges if ticker not in daily_returns.columns)
@@ -712,15 +746,22 @@ def build_equity_processed_dataset(
     panel = _price_panel_with_metadata(prices=prices, seed=seed)
     panel["raw_return"] = panel.groupby("ticker", sort=False)[price_col].transform(lambda s: np.log(s).diff())
     panel["market_ticker"] = market_ticker
+    log(f"built raw panel with {len(panel):,} rows; starting per-ticker beta/residual loop")
 
     rows: list[pd.DataFrame] = []
-    for stock in seed.itertuples(index=False):
+    skipped_missing_price = 0
+    skipped_missing_hedge = 0
+    total_seed = len(seed)
+    commodity_residual_count = 0
+    for idx, stock in enumerate(seed.itertuples(index=False), start=1):
         ticker = str(stock.ticker).upper().strip()
         if ticker not in daily_returns.columns:
+            skipped_missing_price += 1
             continue
         theme = str(stock.theme)
         sector_ticker = theme_hedges.get(theme, market_ticker)
         if sector_ticker not in daily_returns.columns:
+            skipped_missing_hedge += 1
             continue
 
         base = pd.DataFrame(
@@ -810,13 +851,23 @@ def build_equity_processed_dataset(
                 base[f"beta_estimation_end_{comm_name}"] = comm_calc["beta_estimation_end"].to_numpy()
                 base[f"residual_return_{comm_name}"] = comm_calc["residual_return"].to_numpy()
                 base[f"commodity_beta_return_column_{comm_name}"] = commodity_return_column
+                commodity_residual_count += 1
 
         rows.append(base)
+        if idx == 1 or idx == total_seed or idx % 25 == 0:
+            log(
+                f"processed {idx:,}/{total_seed:,} seed rows; "
+                f"built={len(rows):,}; skipped price={skipped_missing_price:,}; "
+                f"skipped hedge={skipped_missing_hedge:,}; commodity residuals={commodity_residual_count:,}"
+            )
 
     if not rows:
+        log("no per-ticker rows built")
         return pd.DataFrame()
 
+    log(f"concatenating {len(rows):,} per-ticker frames")
     returns = pd.concat(rows, ignore_index=True)
+    log(f"merging {len(returns):,} calculated return rows into raw panel")
     out = panel.merge(returns, on=["date", "ticker"], how="left", suffixes=("", "_calc"))
     if "sector_ticker_calc" in out.columns:
         out["sector_ticker"] = out["sector_ticker_calc"].combine_first(out.get("sector_ticker"))
@@ -850,6 +901,7 @@ def build_equity_processed_dataset(
         out = out[out["date"] >= pd.Timestamp(start)]
     if end is not None:
         out = out[out["date"] <= pd.Timestamp(end)]
+    log(f"applied date filters start={start} end={end}; output rows={len(out):,}")
 
     front_cols = [
         "date",
@@ -879,9 +931,11 @@ def build_equity_processed_dataset(
         ],
     ]
     remaining = [col for col in out.columns if col not in front_cols]
-    return out[[col for col in front_cols if col in out.columns] + remaining].sort_values(
+    result = out[[col for col in front_cols if col in out.columns] + remaining].sort_values(
         ["ticker", "date"]
     ).reset_index(drop=True)
+    log(f"finished dataset assembly with {len(result):,} rows x {len(result.columns):,} columns")
+    return result
 
 
 def build_equity_processed_dataset_from_paths(
@@ -900,6 +954,7 @@ def build_equity_processed_dataset_from_paths(
     commodity_beta_symbols: list[str] | None = None,
     commodity_return_column: str = DEFAULT_COMMODITY_BETA_RETURN_COLUMN,
     include_commodity_beta_residuals: bool = True,
+    progress: bool = False,
 ) -> pd.DataFrame:
     dataset = build_equity_processed_dataset(
         prices_dir=prices_dir,
@@ -916,8 +971,11 @@ def build_equity_processed_dataset_from_paths(
         commodity_beta_symbols=commodity_beta_symbols,
         commodity_return_column=commodity_return_column,
         include_commodity_beta_residuals=include_commodity_beta_residuals,
+        progress=progress,
     )
     output_path.parent.mkdir(parents=True, exist_ok=True)
+    if progress:
+        print(f"[build-equity-processed] writing {len(dataset):,} rows to {output_path}", flush=True)
     if output_path.suffix == ".parquet":
         dataset.to_parquet(output_path, index=False)
     elif output_path.suffix == ".csv":

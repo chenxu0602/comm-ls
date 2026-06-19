@@ -5,6 +5,8 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+from comm_ls.research_quality import feature_hypothesis_family
+
 
 DEFAULT_RETURN_COLUMNS = [
     "raw_return",
@@ -136,6 +138,7 @@ def build_quarterly_feature_eligibility(
                 "asof_date",
                 "ticker",
                 "feature",
+                "feature_hypothesis_family",
                 "target_return_column",
                 "horizon_days",
                 "direction_sign",
@@ -147,6 +150,9 @@ def build_quarterly_feature_eligibility(
 
     raw = pd.concat(frames, ignore_index=True)
     raw["ticker"] = raw["ticker"].astype(str).str.upper().str.strip()
+    raw["feature"] = raw["feature"].astype(str).str.strip()
+    if "feature_hypothesis_family" not in raw.columns:
+        raw["feature_hypothesis_family"] = raw["feature"].map(feature_hypothesis_family)
     raw["quarter"] = raw["quarter"].astype(str)
     raw["asof_date"] = pd.to_datetime(raw["asof_date"], utc=False)
     raw["lookback_years"] = pd.to_numeric(raw["lookback_years"], errors="coerce").astype("Int64")
@@ -184,6 +190,9 @@ def build_quarterly_feature_eligibility(
                 "asof_date": group["asof_date"].max(),
                 "ticker": key[2],
                 "feature": key[3],
+                "feature_hypothesis_family": group["feature_hypothesis_family"].dropna().astype(str).iloc[0]
+                if group["feature_hypothesis_family"].notna().any()
+                else feature_hypothesis_family(str(key[3])),
                 "target_return_column": key[4],
                 "horizon_days": int(key[5]),
                 "direction_sign": direction_sign,
@@ -329,11 +338,15 @@ def build_quarterly_trigger_events(
     if "commodity_feature_date" in data.columns:
         data["commodity_feature_date"] = pd.to_datetime(data["commodity_feature_date"], utc=False)
 
-    pair_key = pair[
+    pair_source = pair.copy()
+    if "feature_hypothesis_family" not in pair_source.columns:
+        pair_source["feature_hypothesis_family"] = pair_source["feature"].astype(str).map(feature_hypothesis_family)
+    pair_key = pair_source[
         [
             "quarter",
             "ticker",
             "feature",
+            "feature_hypothesis_family",
             "direction_sign",
             "pair_selected",
             "target_return_column",
@@ -439,6 +452,7 @@ def build_quarterly_trigger_events(
                 "exit_reason": "quarter_end" if exit_date == quarter_end_date < planned_exit_date else "hold_days",
                 "ticker": row.ticker,
                 "feature": row.feature,
+                "feature_hypothesis_family": row.feature_hypothesis_family,
                 "feature_z": float(row.feature_z) if not pd.isna(row.feature_z) else np.nan,
                 "feature_value": float(row.feature_value) if not pd.isna(row.feature_value) else np.nan,
                 "trigger_value": trigger_value,
@@ -517,6 +531,7 @@ def build_event_pnl(
                 "quarter": event.quarter,
                 "ticker": event.ticker,
                 "feature": event.feature,
+                "feature_hypothesis_family": event.feature_hypothesis_family,
                 "side": event.side,
                 "selected": event.selected,
                 "signal_date": event.signal_date,

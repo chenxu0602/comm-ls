@@ -1,15 +1,21 @@
 from __future__ import annotations
 
 from pathlib import Path
+import sys
 
 import numpy as np
 import pandas as pd
 
-from comm_ls.research_quality import _feature_commodity_direction, load_reviewed_features
+from comm_ls.research_quality import _feature_commodity_direction, load_reviewed_features, state_hypothesis
 from comm_ls.universe import load_commodity_exposure_map
 
 
 DEFAULT_FEATURE_SELECTION_ROOT = Path("data/research/feature_selection")
+
+
+def _log(message: str, *, verbose: bool) -> None:
+    if verbose:
+        print(f"[research-commodity-features] {message}", file=sys.stderr, flush=True)
 
 
 def _write_frame(df: pd.DataFrame, path: Path) -> None:
@@ -39,11 +45,18 @@ def _load_role_taxonomy(path: Path) -> pd.DataFrame:
     return taxonomy
 
 
-def _matrix_paths(matrix_dir: Path, manifest_path: Path | None, commodity: str) -> list[Path]:
+def _matrix_paths(
+    matrix_dir: Path,
+    manifest_path: Path | None,
+    commodity: str,
+    quarters: set[str] | None = None,
+) -> list[Path]:
     if manifest_path is not None and manifest_path.exists():
         manifest = pd.read_csv(manifest_path)
         if "path" not in manifest.columns:
             raise ValueError(f"{manifest_path} is missing path column")
+        if quarters is not None and "quarter" in manifest.columns:
+            manifest = manifest[manifest["quarter"].astype(str).isin(quarters)].copy()
         paths = [Path(path) for path in manifest["path"].dropna().astype(str)]
     else:
         paths = sorted(matrix_dir.glob(f"{commodity}-Features-*-*.csv"))
@@ -55,17 +68,38 @@ def load_quarterly_feature_matrices(
     commodity: str,
     manifest_path: Path | None = None,
     quarters: list[str] | None = None,
+    verbose: bool = False,
+    progress_interval: int = 10,
 ) -> pd.DataFrame:
     commodity = commodity.upper().strip()
-    paths = _matrix_paths(matrix_dir=matrix_dir, manifest_path=manifest_path, commodity=commodity)
+    keep_quarters = {quarter.strip() for quarter in quarters} if quarters else None
+    paths = _matrix_paths(
+        matrix_dir=matrix_dir,
+        manifest_path=manifest_path,
+        commodity=commodity,
+        quarters=keep_quarters,
+    )
     if not paths:
         raise FileNotFoundError(f"No quarterly feature matrix files found under {matrix_dir}")
 
-    keep_quarters = {quarter.strip() for quarter in quarters} if quarters else None
+    interval = max(1, int(progress_interval))
+    _log(
+        f"loading {len(paths):,} {commodity} matrix files from {matrix_dir}"
+        + (f" using manifest {manifest_path}" if manifest_path is not None else ""),
+        verbose=verbose,
+    )
     frames: list[pd.DataFrame] = []
-    for path in paths:
+    input_rows = 0
+    kept_rows = 0
+    for idx, path in enumerate(paths, start=1):
         frame = pd.read_csv(path)
+        input_rows += len(frame)
         if frame.empty:
+            if verbose and (idx % interval == 0 or idx == len(paths)):
+                _log(
+                    f"read {idx:,}/{len(paths):,} files; input_rows={input_rows:,}; kept_rows={kept_rows:,}",
+                    verbose=verbose,
+                )
             continue
         frame["source_file"] = str(path)
         if "commodity" in frame.columns:
@@ -74,10 +108,19 @@ def load_quarterly_feature_matrices(
         if keep_quarters is not None and "quarter" in frame.columns:
             frame = frame[frame["quarter"].astype(str).isin(keep_quarters)].copy()
         if not frame.empty:
+            kept_rows += len(frame)
             frames.append(frame)
+        if verbose and (idx % interval == 0 or idx == len(paths)):
+            _log(
+                f"read {idx:,}/{len(paths):,} files; input_rows={input_rows:,}; kept_rows={kept_rows:,}",
+                verbose=verbose,
+            )
     if not frames:
+        _log("no rows remained after commodity/quarter filters", verbose=verbose)
         return pd.DataFrame()
-    return pd.concat(frames, ignore_index=True)
+    out = pd.concat(frames, ignore_index=True)
+    _log(f"loaded matrix rows: {len(out):,}", verbose=verbose)
+    return out
 
 
 def _enabled_reviewed_features(path: Path | None, commodity: str) -> set[str] | None:
@@ -113,6 +156,24 @@ def _issue_list(row: pd.Series) -> str:
 
 def _priority_score(priority: object) -> float:
     return {"high": 1.0, "medium": 0.7, "low": 0.35}.get(str(priority).lower().strip(), 0.4)
+
+
+def _filter_target_return_column(
+    df: pd.DataFrame,
+    target_return_column: str | None,
+    *,
+    label: str,
+    verbose: bool,
+) -> pd.DataFrame:
+    if df.empty or target_return_column is None:
+        return df
+    if "target_return_column" not in df.columns:
+        _log(f"{label}: no target_return_column column; leaving rows unfiltered", verbose=verbose)
+        return df
+    target = target_return_column.strip()
+    out = df[df["target_return_column"].astype(str).str.strip().eq(target)].copy()
+    _log(f"{label}: filtered target_return_column={target}; rows={len(out):,}", verbose=verbose)
+    return out
 
 
 def _aggregate_candidate_scores(
@@ -218,6 +279,7 @@ def _aggregate_candidate_scores(
         0, np.nan
     )
     grouped["feature_commodity_direction"] = grouped["feature"].map(_feature_commodity_direction)
+    grouped["state_hypothesis"] = grouped["feature"].map(state_hypothesis)
 
     grouped = grouped.merge(
         exposure[["ticker", "commodity", "exposure_role", "prior_weight", "notes"]].rename(
@@ -315,7 +377,9 @@ def _aggregate_candidate_scores(
     grouped["flag_weak_nonoverlap"] = grouped["max_nonoverlap_abs_t_stat"].fillna(0) < min_nonoverlap_abs_t
     grouped["flag_unstable_sign"] = grouped["beta_sign_stability"].fillna(0) < min_sign_stability
     grouped["flag_weak_hit_rate"] = (grouped["mean_hit_rate"] - 0.5).abs().fillna(0) < min_hit_rate_edge
-    grouped["flag_missing_commodity_neutral_diagnostic"] = diagnostic is None or diagnostic.empty
+    grouped["flag_missing_commodity_neutral_diagnostic"] = grouped[
+        "commodity_neutral_max_nonoverlap_abs_t_stat"
+    ].isna()
     grouped["flag_commodity_neutral_decay"] = (
         grouped["commodity_neutral_nonoverlap_ratio"].notna()
         & (grouped["commodity_neutral_nonoverlap_ratio"] < commodity_neutral_min_ratio)
@@ -342,11 +406,13 @@ def _aggregate_candidate_scores(
     grouped["selection_flags"] = grouped.apply(_issue_list, axis=1)
     grouped["role_priority_score"] = grouped["alpha_priority"].map(_priority_score)
     grouped["selection_score"] = (
-        0.30 * (grouped["max_abs_t_stat"].clip(upper=6.0) / 6.0).fillna(0.0)
-        + 0.25 * (grouped["max_nonoverlap_abs_t_stat"].clip(upper=3.0) / 3.0).fillna(0.0)
+        0.25 * (grouped["median_nonoverlap_abs_t_stat"].clip(upper=3.0) / 3.0).fillna(0.0)
         + 0.15 * grouped["beta_sign_stability"].fillna(0.0).clip(0.0, 1.0)
-        + 0.15 * (grouped["mean_hit_rate"].sub(0.5).abs().mul(5.0)).fillna(0.0).clip(0.0, 1.0)
-        + 0.15 * grouped["role_priority_score"].fillna(0.0)
+        + 0.15 * (grouped["mean_nonoverlap_hit_rate"].sub(0.5).clip(lower=0.0).mul(5.0)).fillna(0.0).clip(0.0, 1.0)
+        + 0.15 * grouped["median_nonoverlap_beta_per_1z"].abs().clip(upper=0.05).div(0.05).fillna(0.0).clip(0.0, 1.0)
+        + 0.10 * (grouped["mean_hit_rate"].sub(0.5).clip(lower=0.0).mul(5.0)).fillna(0.0).clip(0.0, 1.0)
+        + 0.10 * grouped["role_priority_score"].fillna(0.0)
+        + 0.10 * (grouped["effective_observations_median"].clip(upper=100).div(100)).fillna(0.0)
     )
     grouped.loc[grouped["selection_verdict"].eq("block"), "selection_score"] *= 0.25
 
@@ -375,6 +441,7 @@ def _trigger_role_results(candidate_scores: pd.DataFrame) -> pd.DataFrame:
                 "quarter",
                 "feature",
                 "feature_family",
+                "state_hypothesis",
                 "horizon_days",
                 "target_return_column",
                 "exposure_role",
@@ -418,36 +485,74 @@ def research_commodity_features_from_paths(
     output_dir: Path | None = None,
     quarters: list[str] | None = None,
     include_unreviewed_features: bool = False,
+    target_return_column: str | None = "residual_return_mktsec_w12m",
+    diagnostic_target_return_column: str | None = "residual_return_mktseccomm_w12m",
     min_abs_t: float = 2.0,
     min_nonoverlap_abs_t: float = 1.0,
     min_effective_observations: int = 20,
     min_hit_rate_edge: float = 0.03,
     min_sign_stability: float = 0.5,
     commodity_neutral_min_ratio: float = 0.5,
+    verbose: bool = False,
+    progress_interval: int = 10,
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     commodity = commodity.upper().strip()
     matrix_dir = matrix_dir or Path(f"data/matrix/{commodity}")
     manifest_path = manifest_path or matrix_dir / f"{commodity}-Features-manifest.csv"
     output_dir = output_dir or DEFAULT_FEATURE_SELECTION_ROOT / commodity
 
+    _log(f"start commodity={commodity}; output_dir={output_dir}", verbose=verbose)
     matrix = load_quarterly_feature_matrices(
         matrix_dir=matrix_dir,
         manifest_path=manifest_path if manifest_path.exists() else None,
         commodity=commodity,
         quarters=quarters,
+        verbose=verbose,
+        progress_interval=progress_interval,
+    )
+    _log(f"main matrix ready: rows={len(matrix):,}", verbose=verbose)
+    unfiltered_matrix = matrix
+    matrix = _filter_target_return_column(
+        matrix,
+        target_return_column,
+        label="main matrix",
+        verbose=verbose,
     )
     diagnostic = None
     if diagnostic_matrix_dir is not None:
+        _log(f"loading diagnostic matrix from {diagnostic_matrix_dir}", verbose=verbose)
         diagnostic_manifest = diagnostic_manifest_path or diagnostic_matrix_dir / f"{commodity}-Features-manifest.csv"
         diagnostic = load_quarterly_feature_matrices(
             matrix_dir=diagnostic_matrix_dir,
             manifest_path=diagnostic_manifest if diagnostic_manifest.exists() else None,
             commodity=commodity,
             quarters=quarters,
+            verbose=verbose,
+            progress_interval=progress_interval,
         )
+        _log(f"diagnostic matrix ready: rows={len(diagnostic):,}", verbose=verbose)
+    elif diagnostic_target_return_column:
+        _log(
+            f"using main matrix as diagnostic source with target_return_column={diagnostic_target_return_column}",
+            verbose=verbose,
+        )
+        diagnostic = unfiltered_matrix
+    if diagnostic is not None and diagnostic_target_return_column:
+        diagnostic = _filter_target_return_column(
+            diagnostic,
+            diagnostic_target_return_column,
+            label="diagnostic matrix",
+            verbose=verbose,
+        )
+        if target_return_column and "target_return_column" in diagnostic.columns:
+            diagnostic = diagnostic.copy()
+            diagnostic["target_return_column"] = target_return_column
 
+    _log(f"loading exposure map: {exposure_map_path}", verbose=verbose)
     exposure = load_commodity_exposure_map(exposure_map_path)
+    _log(f"loading role taxonomy: {role_taxonomy_path}", verbose=verbose)
     taxonomy = _load_role_taxonomy(role_taxonomy_path)
+    _log("aggregating candidate scores", verbose=verbose)
     candidate_scores = _aggregate_candidate_scores(
         matrix=matrix,
         exposure_map=exposure,
@@ -463,12 +568,22 @@ def research_commodity_features_from_paths(
         diagnostic=diagnostic,
         commodity_neutral_min_ratio=commodity_neutral_min_ratio,
     )
+    _log(f"candidate scores ready: rows={len(candidate_scores):,}", verbose=verbose)
     selected = candidate_scores[~candidate_scores["selection_verdict"].eq("block")].copy()
     blocked = candidate_scores[candidate_scores["selection_verdict"].eq("block")].copy()
+    _log(f"selected rows={len(selected):,}; blocked rows={len(blocked):,}", verbose=verbose)
+    _log("aggregating trigger-role results", verbose=verbose)
     role_results = _trigger_role_results(candidate_scores)
+    _log(f"trigger-role rows={len(role_results):,}", verbose=verbose)
 
-    _write_frame(candidate_scores, output_dir / "feature_candidate_scores.csv")
-    _write_frame(selected, output_dir / "selected_features.csv")
-    _write_frame(blocked, output_dir / "blocked_features.csv")
-    _write_frame(role_results, output_dir / "trigger_role_results.csv")
+    outputs = [
+        (candidate_scores, output_dir / "feature_candidate_scores.csv"),
+        (selected, output_dir / "selected_features.csv"),
+        (blocked, output_dir / "blocked_features.csv"),
+        (role_results, output_dir / "trigger_role_results.csv"),
+    ]
+    for frame, path in outputs:
+        _log(f"writing {len(frame):,} rows to {path}", verbose=verbose)
+        _write_frame(frame, path)
+    _log("done", verbose=verbose)
     return candidate_scores, selected, blocked, role_results

@@ -27,6 +27,7 @@ QUARTERLY_FEATURE_MATRIX_COLUMNS = [
     "feature",
     "feature_family",
     "horizon_days",
+    "target_return_column",
     "observations",
     "effective_observations",
     "corr",
@@ -455,6 +456,7 @@ def build_daily_feature_return_cache(
     commodity: str,
     features: list[str] | None = None,
     horizons: list[int] | None = None,
+    return_column: str | list[str] | tuple[str, ...] = "residual_return",
     feature_preset: str = "priority",
     feature_z_window: int = 252,
     min_feature_observations: int = 126,
@@ -463,6 +465,9 @@ def build_daily_feature_return_cache(
 ) -> pd.DataFrame:
     commodity = commodity.upper().strip()
     horizons = horizons or DEFAULT_DISCOVERY_HORIZONS
+    return_columns = [return_column] if isinstance(return_column, str) else list(return_column)
+    if not return_columns:
+        raise ValueError("At least one return_column is required")
 
     signals = commodity_signals.copy()
     signals["symbol"] = signals["symbol"].astype(str).str.upper().str.strip()
@@ -499,6 +504,10 @@ def build_daily_feature_return_cache(
         std = value.rolling(feature_z_window, min_periods=min_feature_observations).std()
         z[f"feature_z__{feature}"] = (value - mean) / std
 
+    missing_return_columns = sorted(set(return_columns).difference(stock.columns))
+    if missing_return_columns:
+        raise ValueError(f"beta_returns is missing return columns: {missing_return_columns}")
+
     keep_cols = [
         "date",
         "ticker",
@@ -514,8 +523,8 @@ def build_daily_feature_return_cache(
         "market_beta",
         "sector_beta",
         "beta_observations",
-        "residual_return",
     ]
+    keep_cols.extend(return_columns)
     optional_cols = [
         "beta_estimation_end",
         "beta_return_frequency",
@@ -527,15 +536,19 @@ def build_daily_feature_return_cache(
         "hedge_ratio_scale",
     ]
     keep_cols.extend([col for col in optional_cols if col in stock.columns])
+    keep_cols = list(dict.fromkeys(keep_cols))
     cache = stock[[col for col in keep_cols if col in stock.columns]].copy()
 
     for ticker, group_index in cache.groupby("ticker", sort=False).groups.items():
         idx = list(group_index)
-        s = cache.loc[idx, "residual_return"]
         dates = cache.loc[idx, "date"]
-        for horizon in horizons:
-            cache.loc[idx, f"fwd_residual_return_{horizon}d"] = _forward_sum(s, horizon).to_numpy()
-            cache.loc[idx, f"target_end_{horizon}d"] = dates.shift(-horizon).to_numpy()
+        for column in return_columns:
+            s = cache.loc[idx, column]
+            for horizon in horizons:
+                cache.loc[idx, f"fwd_return__{column}_{horizon}d"] = _forward_sum(s, horizon).to_numpy()
+                if column == "residual_return":
+                    cache.loc[idx, f"fwd_residual_return_{horizon}d"] = _forward_sum(s, horizon).to_numpy()
+                cache.loc[idx, f"target_end_{horizon}d"] = dates.shift(-horizon).to_numpy()
 
     cache = cache.merge(z, left_on="date", right_on="signal_date", how="left").drop(columns=["signal_date"])
     cache.insert(0, "commodity", commodity)
@@ -552,6 +565,7 @@ def build_daily_feature_return_cache_from_paths(
     commodity: str,
     features: list[str] | None = None,
     horizons: list[int] | None = None,
+    return_column: str | list[str] | tuple[str, ...] = "residual_return",
     feature_preset: str = "priority",
     feature_z_window: int = 252,
     min_feature_observations: int = 126,
@@ -564,6 +578,7 @@ def build_daily_feature_return_cache_from_paths(
         commodity=commodity,
         features=features,
         horizons=horizons,
+        return_column=return_column,
         feature_preset=feature_preset,
         feature_z_window=feature_z_window,
         min_feature_observations=min_feature_observations,
@@ -766,6 +781,7 @@ def _stock_feature_rows_for_quarter_window(
     ticker: str,
     years: int,
     horizons: list[int],
+    target_return_columns: list[str] | None,
     min_observations: int,
 ) -> list[dict[str, object]]:
     sample_start = asof_date - pd.DateOffset(years=years)
@@ -782,140 +798,151 @@ def _stock_feature_rows_for_quarter_window(
     )
 
     rows: list[dict[str, object]] = []
-    for horizon in horizons:
-        target_col = f"fwd_residual_return_{horizon}d"
-        target_end_col = f"target_end_{horizon}d"
-        if target_col not in sample_base.columns or target_end_col not in sample_base.columns:
+    target_return_columns = target_return_columns or ["residual_return"]
+    for target_return_column in target_return_columns:
+        target_return_column = str(target_return_column).strip()
+        if not target_return_column:
             continue
-        sample = sample_base[sample_base[target_end_col] <= asof_date]
-        if sample.empty:
-            continue
-        y = pd.to_numeric(sample[target_col], errors="coerce").to_numpy(dtype=float)
-        x_matrix = sample[feature_z_cols].to_numpy(dtype=float)
-        valid = np.isfinite(x_matrix) & np.isfinite(y[:, None])
-        observations_by_feature = valid.sum(axis=0).astype(int)
-        good = observations_by_feature >= min_observations
-        if not good.any():
-            continue
+        for horizon in horizons:
+            if target_return_column == "residual_return":
+                target_col = f"fwd_residual_return_{horizon}d"
+            else:
+                target_col = f"fwd_return__{target_return_column}_{horizon}d"
+            target_end_col = f"target_end_{horizon}d"
+            if target_col not in sample_base.columns or target_end_col not in sample_base.columns:
+                continue
+            sample = sample_base[sample_base[target_end_col] <= asof_date]
+            if sample.empty:
+                continue
+            y = pd.to_numeric(sample[target_col], errors="coerce").to_numpy(dtype=float)
+            x_matrix = sample[feature_z_cols].to_numpy(dtype=float)
+            valid = np.isfinite(x_matrix) & np.isfinite(y[:, None])
+            observations_by_feature = valid.sum(axis=0).astype(int)
+            good = observations_by_feature >= min_observations
+            if not good.any():
+                continue
 
-        y_matrix = np.broadcast_to(y[:, None], x_matrix.shape)
-        x_values = np.where(valid, x_matrix, 0.0)
-        y_values = np.where(valid, y_matrix, 0.0)
-        n = observations_by_feature.astype(float)
+            y_matrix = np.broadcast_to(y[:, None], x_matrix.shape)
+            x_values = np.where(valid, x_matrix, 0.0)
+            y_values = np.where(valid, y_matrix, 0.0)
+            n = observations_by_feature.astype(float)
 
-        with np.errstate(invalid="ignore", divide="ignore"):
-            x_mean = x_values.sum(axis=0) / n
-            y_mean = y_values.sum(axis=0) / n
-        dx = np.where(valid, x_matrix - x_mean, 0.0)
-        dy = np.where(valid, y_matrix - y_mean, 0.0)
-        cov_sum = (dx * dy).sum(axis=0)
-        x_var_sum = (dx * dx).sum(axis=0)
-        y_var_sum = (dy * dy).sum(axis=0)
+            with np.errstate(invalid="ignore", divide="ignore"):
+                x_mean = x_values.sum(axis=0) / n
+                y_mean = y_values.sum(axis=0) / n
+            dx = np.where(valid, x_matrix - x_mean, 0.0)
+            dy = np.where(valid, y_matrix - y_mean, 0.0)
+            cov_sum = (dx * dy).sum(axis=0)
+            x_var_sum = (dx * dx).sum(axis=0)
+            y_var_sum = (dy * dy).sum(axis=0)
 
-        with np.errstate(invalid="ignore", divide="ignore"):
-            corr_values = cov_sum / np.sqrt(x_var_sum * y_var_sum)
-            beta_values = cov_sum / x_var_sum
-            t_values = corr_values * np.sqrt((n - 2.0) / np.maximum(1e-12, 1.0 - corr_values * corr_values))
-            residual_vol_values = np.sqrt(y_var_sum / (n - 1.0))
-        hit_counts = ((np.sign(x_matrix) * y[:, None] > 0) & valid).sum(axis=0)
-        hit_rates = np.divide(hit_counts, n, out=np.full_like(n, np.nan, dtype=float), where=n > 0)
+            with np.errstate(invalid="ignore", divide="ignore"):
+                corr_values = cov_sum / np.sqrt(x_var_sum * y_var_sum)
+                beta_values = cov_sum / x_var_sum
+                t_values = corr_values * np.sqrt(
+                    (n - 2.0) / np.maximum(1e-12, 1.0 - corr_values * corr_values)
+                )
+                residual_vol_values = np.sqrt(y_var_sum / (n - 1.0))
+            hit_counts = ((np.sign(x_matrix) * y[:, None] > 0) & valid).sum(axis=0)
+            hit_rates = np.divide(hit_counts, n, out=np.full_like(n, np.nan, dtype=float), where=n > 0)
 
-        nonoverlap_idx = np.arange(0, len(sample), max(1, horizon), dtype=int)
-        x_non = x_matrix[nonoverlap_idx]
-        y_non = y[nonoverlap_idx]
-        valid_non = np.isfinite(x_non) & np.isfinite(y_non[:, None])
-        n_non = valid_non.sum(axis=0).astype(float)
-        x_non_values = np.where(valid_non, x_non, 0.0)
-        y_non_matrix = np.broadcast_to(y_non[:, None], x_non.shape)
-        y_non_values = np.where(valid_non, y_non_matrix, 0.0)
-        with np.errstate(invalid="ignore", divide="ignore"):
-            x_non_mean = np.divide(
-                x_non_values.sum(axis=0),
+            nonoverlap_idx = np.arange(0, len(sample), max(1, horizon), dtype=int)
+            x_non = x_matrix[nonoverlap_idx]
+            y_non = y[nonoverlap_idx]
+            valid_non = np.isfinite(x_non) & np.isfinite(y_non[:, None])
+            n_non = valid_non.sum(axis=0).astype(float)
+            x_non_values = np.where(valid_non, x_non, 0.0)
+            y_non_matrix = np.broadcast_to(y_non[:, None], x_non.shape)
+            y_non_values = np.where(valid_non, y_non_matrix, 0.0)
+            with np.errstate(invalid="ignore", divide="ignore"):
+                x_non_mean = np.divide(
+                    x_non_values.sum(axis=0),
+                    n_non,
+                    out=np.full_like(n_non, np.nan, dtype=float),
+                    where=n_non > 0,
+                )
+                y_non_mean = np.divide(
+                    y_non_values.sum(axis=0),
+                    n_non,
+                    out=np.full_like(n_non, np.nan, dtype=float),
+                    where=n_non > 0,
+                )
+            dx_non = np.where(valid_non, x_non - x_non_mean, 0.0)
+            dy_non = np.where(valid_non, y_non_matrix - y_non_mean, 0.0)
+            cov_non_sum = (dx_non * dy_non).sum(axis=0)
+            x_non_var_sum = (dx_non * dx_non).sum(axis=0)
+            y_non_var_sum = (dy_non * dy_non).sum(axis=0)
+            with np.errstate(invalid="ignore", divide="ignore"):
+                corr_non_values = cov_non_sum / np.sqrt(x_non_var_sum * y_non_var_sum)
+                beta_non_values = cov_non_sum / x_non_var_sum
+                t_non_values = corr_non_values * np.sqrt(
+                    (n_non - 2.0) / np.maximum(1e-12, 1.0 - corr_non_values * corr_non_values)
+                )
+            valid_non_for_t = n_non >= 3
+            corr_non_values = np.where(valid_non_for_t, corr_non_values, np.nan)
+            beta_non_values = np.where(valid_non_for_t, beta_non_values, np.nan)
+            t_non_values = np.where(valid_non_for_t, t_non_values, np.nan)
+            hit_non_counts = ((np.sign(x_non) * y_non[:, None] > 0) & valid_non).sum(axis=0)
+            hit_non_rates = np.divide(
+                hit_non_counts,
                 n_non,
                 out=np.full_like(n_non, np.nan, dtype=float),
                 where=n_non > 0,
             )
-            y_non_mean = np.divide(
-                y_non_values.sum(axis=0),
-                n_non,
-                out=np.full_like(n_non, np.nan, dtype=float),
-                where=n_non > 0,
-            )
-        dx_non = np.where(valid_non, x_non - x_non_mean, 0.0)
-        dy_non = np.where(valid_non, y_non_matrix - y_non_mean, 0.0)
-        cov_non_sum = (dx_non * dy_non).sum(axis=0)
-        x_non_var_sum = (dx_non * dx_non).sum(axis=0)
-        y_non_var_sum = (dy_non * dy_non).sum(axis=0)
-        with np.errstate(invalid="ignore", divide="ignore"):
-            corr_non_values = cov_non_sum / np.sqrt(x_non_var_sum * y_non_var_sum)
-            beta_non_values = cov_non_sum / x_non_var_sum
-            t_non_values = corr_non_values * np.sqrt(
-                (n_non - 2.0) / np.maximum(1e-12, 1.0 - corr_non_values * corr_non_values)
-            )
-        valid_non_for_t = n_non >= 3
-        corr_non_values = np.where(valid_non_for_t, corr_non_values, np.nan)
-        beta_non_values = np.where(valid_non_for_t, beta_non_values, np.nan)
-        t_non_values = np.where(valid_non_for_t, t_non_values, np.nan)
-        hit_non_counts = ((np.sign(x_non) * y_non[:, None] > 0) & valid_non).sum(axis=0)
-        hit_non_rates = np.divide(
-            hit_non_counts,
-            n_non,
-            out=np.full_like(n_non, np.nan, dtype=float),
-            where=n_non > 0,
-        )
 
-        dates = sample["date"]
-        target_end_dates = sample[target_end_col]
-        for feature_idx, feature_col in enumerate(feature_z_cols):
-            if not good[feature_idx]:
-                continue
-            corr = float(corr_values[feature_idx])
-            beta_per_z = float(beta_values[feature_idx])
-            t_stat = float(t_values[feature_idx])
-            residual_vol = float(residual_vol_values[feature_idx])
-            if not all(np.isfinite(value) for value in [corr, beta_per_z, t_stat, residual_vol]):
-                continue
-            feature_valid = valid[:, feature_idx]
-            observations = int(observations_by_feature[feature_idx])
-            if observations < min_observations:
-                continue
-            feature = feature_col.removeprefix("feature_z__")
-            valid_dates = dates.iloc[feature_valid]
-            rows.append(
-                {
-                    "commodity": commodity,
-                    "quarter": quarter,
-                    "quarter_start": quarter_start.date().isoformat(),
-                    "asof_date": asof_date.date().isoformat(),
-                    "lookback_years": years,
-                    "sample_start": valid_dates.min().date().isoformat(),
-                    "sample_end": valid_dates.max().date().isoformat(),
-                    "ticker": ticker,
-                    "theme": theme,
-                    "role": role,
-                    "region": region,
-                    "feature": feature,
-                    "feature_family": _category_for(feature),
-                    "horizon_days": horizon,
-                    "observations": observations,
-                    "effective_observations": int(n_non[feature_idx]),
-                    "corr": corr,
-                    "t_stat": t_stat,
-                    "abs_t_stat": abs(t_stat),
-                    "nonoverlap_corr": float(corr_non_values[feature_idx]),
-                    "nonoverlap_t_stat": float(t_non_values[feature_idx]),
-                    "nonoverlap_abs_t_stat": abs(float(t_non_values[feature_idx]))
-                    if np.isfinite(t_non_values[feature_idx])
-                    else np.nan,
-                    "nonoverlap_beta_per_1z": float(beta_non_values[feature_idx]),
-                    "nonoverlap_hit_rate": float(hit_non_rates[feature_idx]),
-                    "beta_per_1z": beta_per_z,
-                    "direction_sign": float(np.sign(beta_per_z)) if beta_per_z != 0 else 0.0,
-                    "hit_rate": float(hit_rates[feature_idx]),
-                    "residual_vol": residual_vol,
-                    "target_end_date_max": target_end_dates.iloc[feature_valid].max().date().isoformat(),
-                }
-            )
+            dates = sample["date"]
+            target_end_dates = sample[target_end_col]
+            for feature_idx, feature_col in enumerate(feature_z_cols):
+                if not good[feature_idx]:
+                    continue
+                corr = float(corr_values[feature_idx])
+                beta_per_z = float(beta_values[feature_idx])
+                t_stat = float(t_values[feature_idx])
+                residual_vol = float(residual_vol_values[feature_idx])
+                if not all(np.isfinite(value) for value in [corr, beta_per_z, t_stat, residual_vol]):
+                    continue
+                feature_valid = valid[:, feature_idx]
+                observations = int(observations_by_feature[feature_idx])
+                if observations < min_observations:
+                    continue
+                feature = feature_col.removeprefix("feature_z__")
+                valid_dates = dates.iloc[feature_valid]
+                rows.append(
+                    {
+                        "commodity": commodity,
+                        "quarter": quarter,
+                        "quarter_start": quarter_start.date().isoformat(),
+                        "asof_date": asof_date.date().isoformat(),
+                        "lookback_years": years,
+                        "sample_start": valid_dates.min().date().isoformat(),
+                        "sample_end": valid_dates.max().date().isoformat(),
+                        "ticker": ticker,
+                        "theme": theme,
+                        "role": role,
+                        "region": region,
+                        "feature": feature,
+                        "feature_family": _category_for(feature),
+                        "horizon_days": horizon,
+                        "target_return_column": target_return_column,
+                        "observations": observations,
+                        "effective_observations": int(n_non[feature_idx]),
+                        "corr": corr,
+                        "t_stat": t_stat,
+                        "abs_t_stat": abs(t_stat),
+                        "nonoverlap_corr": float(corr_non_values[feature_idx]),
+                        "nonoverlap_t_stat": float(t_non_values[feature_idx]),
+                        "nonoverlap_abs_t_stat": abs(float(t_non_values[feature_idx]))
+                        if np.isfinite(t_non_values[feature_idx])
+                        else np.nan,
+                        "nonoverlap_beta_per_1z": float(beta_non_values[feature_idx]),
+                        "nonoverlap_hit_rate": float(hit_non_rates[feature_idx]),
+                        "beta_per_1z": beta_per_z,
+                        "direction_sign": float(np.sign(beta_per_z)) if beta_per_z != 0 else 0.0,
+                        "hit_rate": float(hit_rates[feature_idx]),
+                        "residual_vol": residual_vol,
+                        "target_end_date_max": target_end_dates.iloc[feature_valid].max().date().isoformat(),
+                    }
+                )
     return rows
 
 
@@ -926,13 +953,18 @@ def write_quarterly_stock_feature_matrix_files(
     commodity: str,
     lookback_years: list[int] | None = None,
     horizons: list[int] | None = None,
+    target_return_columns: list[str] | None = None,
     start: str | None = None,
     end: str | None = None,
     min_observations: int = 126,
+    verbose: bool = False,
+    progress_interval: int = 25,
 ) -> pd.DataFrame:
     commodity = commodity.upper().strip()
     lookback_years = lookback_years or DEFAULT_DISCOVERY_SAMPLE_YEARS
     horizons = horizons or DEFAULT_DISCOVERY_HORIZONS
+    target_return_columns = target_return_columns or ["residual_return"]
+    progress_interval = max(1, int(progress_interval))
 
     cache = cache.copy()
     cache["commodity"] = cache["commodity"].astype(str).str.upper().str.strip()
@@ -963,9 +995,18 @@ def write_quarterly_stock_feature_matrix_files(
 
     output_dir.mkdir(parents=True, exist_ok=True)
     manifest_rows: list[dict[str, object]] = []
+    total_jobs = len(quarters) * len(lookback_years)
+    job_count = 0
+    if verbose:
+        print(
+            f"[build-quarterly-stock-feature-matrix] start commodity={commodity}; "
+            f"quarters={len(quarters)}; lookbacks={lookback_years}; horizons={horizons}; "
+            f"targets={target_return_columns}; output_dir={output_dir}"
+        )
     for quarter, quarter_start, asof_date in quarters:
         active_tickers = active_by_quarter.get(quarter, [])
         for years in lookback_years:
+            job_count += 1
             rows: list[dict[str, object]] = []
             for ticker in active_tickers:
                 ticker_cache = cache_by_ticker.get(ticker)
@@ -982,6 +1023,7 @@ def write_quarterly_stock_feature_matrix_files(
                         ticker=ticker,
                         years=years,
                         horizons=horizons,
+                        target_return_columns=target_return_columns,
                         min_observations=min_observations,
                     )
                 )
@@ -1004,9 +1046,15 @@ def write_quarterly_stock_feature_matrix_files(
                     "tickers": len(active_tickers),
                     "features": len(feature_z_cols),
                     "horizons": ",".join(str(horizon) for horizon in horizons),
+                    "target_return_columns": ",".join(target_return_columns),
                     "path": str(output_path),
                 }
             )
+            if verbose and (job_count == 1 or job_count % progress_interval == 0 or job_count == total_jobs):
+                print(
+                    f"[build-quarterly-stock-feature-matrix] wrote {job_count}/{total_jobs} "
+                    f"files; quarter={quarter}; lookback={years}Y; rows={len(matrix):,}"
+                )
     return pd.DataFrame(manifest_rows)
 
 
@@ -1043,25 +1091,64 @@ def write_quarterly_stock_feature_matrix_files_from_paths(
     commodity: str,
     lookback_years: list[int] | None = None,
     horizons: list[int] | None = None,
+    target_return_columns: list[str] | None = None,
     start: str | None = None,
     end: str | None = None,
     min_observations: int = 126,
+    verbose: bool = False,
+    progress_interval: int = 25,
 ) -> pd.DataFrame:
+    target_return_columns = target_return_columns or ["residual_return"]
+    horizons = horizons or DEFAULT_DISCOVERY_HORIZONS
+    cache = _load_quarterly_matrix_cache_columns(
+        cache_path=cache_path,
+        target_return_columns=target_return_columns,
+        horizons=horizons,
+    )
     manifest = write_quarterly_stock_feature_matrix_files(
-        cache=load_frame(cache_path),
+        cache=cache,
         broad_universe=load_frame(broad_universe_path),
         output_dir=output_dir,
         commodity=commodity,
         lookback_years=lookback_years,
         horizons=horizons,
+        target_return_columns=target_return_columns,
         start=start,
         end=end,
         min_observations=min_observations,
+        verbose=verbose,
+        progress_interval=progress_interval,
     )
     if manifest_path is not None:
         manifest_path.parent.mkdir(parents=True, exist_ok=True)
         manifest.to_csv(manifest_path, index=False)
     return manifest
+
+
+def _load_quarterly_matrix_cache_columns(
+    cache_path: Path,
+    target_return_columns: list[str],
+    horizons: list[int],
+) -> pd.DataFrame:
+    try:
+        import pyarrow.parquet as pq
+
+        schema_names = set(pq.read_schema(cache_path).names)
+    except Exception:
+        return load_frame(cache_path)
+
+    columns = ["commodity", "date", "ticker", "theme", "role", "region"]
+    columns.extend(sorted(col for col in schema_names if col.startswith("feature_z__")))
+    for horizon in horizons:
+        columns.append(f"target_end_{horizon}d")
+        for target_return_column in target_return_columns:
+            target_return_column = str(target_return_column).strip()
+            if target_return_column == "residual_return":
+                columns.append(f"fwd_residual_return_{horizon}d")
+            else:
+                columns.append(f"fwd_return__{target_return_column}_{horizon}d")
+    available = [col for col in dict.fromkeys(columns) if col in schema_names]
+    return pd.read_parquet(cache_path, columns=available)
 
 
 def _best_sensitivity_by_ticker(matrix: pd.DataFrame, min_abs_t: float) -> pd.DataFrame:

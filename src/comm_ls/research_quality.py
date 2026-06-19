@@ -36,6 +36,89 @@ def feature_family(feature: str) -> str:
     return "other"
 
 
+def feature_hypothesis_family(feature: str) -> str:
+    """Group related feature variants into one research hypothesis family."""
+    name = str(feature).removeprefix("feature_z__").strip().lower()
+
+    def _curve_anchor(value: str) -> str:
+        for anchor in [
+            "front_second",
+            "front_third",
+            "calendar_dec",
+            "next_jun",
+            "liquid_deferred",
+            "activity_deferred",
+        ]:
+            if value.startswith(anchor):
+                return anchor
+        return "generic"
+
+    def _change_bucket(value: str) -> str:
+        return "change" if "_chg_" in value or value.endswith("_chg") else "level"
+
+    if "annualized_carry" in name or "backwardation_steepness" in name:
+        return f"curve_slope:{_curve_anchor(name)}:{_change_bucket(name)}"
+    if name in {"carry", "carry_chg_5d", "carry_chg_21d", "carry_pctile_252d"}:
+        return f"curve_slope:custom:{_change_bucket(name)}"
+    if name in {"front_second_spread", "front_third_spread"} or name.endswith("_spread"):
+        return f"curve_spread:{_curve_anchor(name)}:level"
+    if "log_ret" in name:
+        return f"deferred_contract_return:{_curve_anchor(name)}:{_change_bucket(name)}"
+    if name.startswith(("front_price_high_", "front_price_low_")):
+        state = "high" if name.startswith("front_price_high_") else "low"
+        return f"front_price_regime:{state}"
+    if name.startswith(("realized_vol_", "vol_chg_", "m0_atr_", "abs_ret_")):
+        return "volatility_state"
+    if name.startswith(("volume_surge", "oi_surge", "price_volume", "price_oi")):
+        return "participation_confirmation"
+    if name.startswith("ret_accel"):
+        return "price_momentum:acceleration"
+    if name.startswith(("ret_", "m0_ret", "m1_ret", "m2_ret")):
+        return "price_momentum:return"
+    if name.startswith(("breakout", "drawdown", "up_days")):
+        return "price_momentum:regime"
+    return f"{feature_family(name)}:{name}"
+
+
+def state_hypothesis(feature: str) -> str:
+    """Map an observed feature to a deterministic state hypothesis.
+
+    This is intentionally a coarse research label, not a latent model. The goal
+    is to group redundant feature projections before promotion review.
+    """
+    name = str(feature).removeprefix("feature_z__").strip().lower()
+
+    if name == "days_in_backwardation":
+        return "curve_tightness_persistence"
+    if name in {"backwardation_regime_change", "term_structure_regime_change"}:
+        return "curve_state_transition"
+    if "annualized_carry" in name or "backwardation_steepness" in name:
+        return "curve_tightness_change" if "_chg_" in name or name.endswith("_chg") else "curve_tightness"
+    if "spread" in name or name in {"carry", "carry_pctile_252d"}:
+        return "curve_tightness"
+    if name.startswith("carry_chg"):
+        return "curve_tightness_change"
+    if "log_ret" in name:
+        return "deferred_contract_momentum"
+    if name.startswith("front_price_high_"):
+        return "price_pressure_high"
+    if name.startswith("front_price_low_"):
+        return "price_pressure_low"
+    if name.startswith("ret_accel"):
+        return "momentum_acceleration"
+    if name.startswith("drawdown"):
+        return "price_drawdown_state"
+    if name.startswith("breakout") or name.startswith("up_days"):
+        return "price_breakout_state"
+    if name.startswith(("ret_", "m0_ret", "m1_ret", "m2_ret")):
+        return "price_momentum_state"
+    if name.startswith(("realized_vol_", "vol_chg_", "m0_atr_", "abs_ret_", "large_move")):
+        return "volatility_state"
+    if name.startswith(("volume_", "volume_surge", "oi_", "oi_surge", "price_volume", "price_oi")):
+        return "participation_flow_state"
+    return f"observed_feature_state:{feature_family(name)}"
+
+
 def load_reviewed_features(path: Path) -> pd.DataFrame:
     reviewed = pd.read_csv(path)
     required = {"commodity", "feature", "feature_family", "review_status", "default_enabled"}
@@ -122,6 +205,7 @@ def build_forecast_audit(
     aggregate["feature_family"] = aggregate["feature"].map(family_map).fillna(
         aggregate["feature"].map(feature_family)
     )
+    aggregate["feature_hypothesis_family"] = aggregate["feature"].map(feature_hypothesis_family)
 
     peer_cols = ["ticker", "commodity", "exposure_role", "prior_weight"]
     if exposure_map is not None and not exposure_map.empty:
@@ -246,6 +330,7 @@ def build_forecast_audit(
         "peer_group",
         "feature",
         "feature_family",
+        "feature_hypothesis_family",
         "horizon_days",
         "observations",
         "t_stat",
@@ -271,6 +356,8 @@ def build_forecast_audit(
 def _feature_commodity_direction(feature: str) -> float:
     """Return the commodity-price/tightness direction implied by higher feature values."""
     name = str(feature)
+    if name.startswith(("realized_vol_", "vol_chg_", "m0_atr_", "abs_ret_", "large_move")):
+        return 1.0
     if "backwardation_steepness" in name:
         return 1.0
     if name == "days_in_backwardation":
@@ -353,6 +440,8 @@ def build_sensitivity_falsification_audit(
     out["feature_commodity_direction"] = out["feature"].map(_feature_commodity_direction)
     if "feature_family" not in out.columns:
         out["feature_family"] = out["feature"].map(feature_family)
+    if "feature_hypothesis_family" not in out.columns:
+        out["feature_hypothesis_family"] = out["feature"].map(feature_hypothesis_family)
     out["expected_beta_sign"] = np.sign(out["prior_weight"] * out["feature_commodity_direction"])
     out["observed_beta_sign"] = np.sign(out["beta_per_1z"])
 
@@ -364,7 +453,7 @@ def build_sensitivity_falsification_audit(
     ].copy()
     if not mapped.empty:
         breadth = (
-            mapped.groupby(["commodity", "exposure_role", "feature_family", "horizon_days"], dropna=False)
+            mapped.groupby(["commodity", "exposure_role", "feature_hypothesis_family", "horizon_days"], dropna=False)
             .agg(
                 peer_breadth_count=("ticker", "nunique"),
                 peer_positive_count=("observed_beta_sign", lambda s: int((s > 0).sum())),
@@ -388,7 +477,7 @@ def build_sensitivity_falsification_audit(
         )
         out = out.merge(
             breadth,
-            on=["commodity", "exposure_role", "feature_family", "horizon_days"],
+            on=["commodity", "exposure_role", "feature_hypothesis_family", "horizon_days"],
             how="left",
         )
     else:
@@ -455,6 +544,7 @@ def build_sensitivity_falsification_audit(
         "prior_weight",
         "feature",
         "feature_family",
+        "feature_hypothesis_family",
         "horizon_days",
         "lookback_years",
         "observations",
@@ -594,6 +684,9 @@ def build_candidate_taxonomy_review(
     candidates: pd.DataFrame,
     exposure_map: pd.DataFrame,
     role_taxonomy: pd.DataFrame | None = None,
+    mechanism_alignment: pd.DataFrame | None = None,
+    min_mechanism_alignment_probability: float = 0.67,
+    mechanism_review_band: float = 0.55,
 ) -> pd.DataFrame:
     if candidates.empty:
         return candidates.copy()
@@ -604,9 +697,14 @@ def build_candidate_taxonomy_review(
     if "feature" in cand.columns:
         cand["feature"] = cand["feature"].astype(str).str.strip()
         cand["feature_family"] = cand.get("feature_family", cand["feature"].map(feature_family))
+        cand["feature_hypothesis_family"] = cand.get(
+            "feature_hypothesis_family",
+            cand["feature"].map(feature_hypothesis_family),
+        )
     else:
         cand["feature"] = pd.NA
         cand["feature_family"] = pd.NA
+        cand["feature_hypothesis_family"] = pd.NA
     canonical_review_cols = [
         "exposure_role",
         "prior_weight",
@@ -722,14 +820,59 @@ def build_candidate_taxonomy_review(
         ["block", "review"],
         default="pass",
     )
+
+    if mechanism_alignment is not None and not mechanism_alignment.empty:
+        if "preferred_horizon" in out.columns:
+            out["preferred_horizon"] = pd.to_numeric(out["preferred_horizon"], errors="coerce").astype("Int64")
+        else:
+            out["preferred_horizon"] = pd.Series(pd.array([pd.NA] * len(out), dtype="Int64"), index=out.index)
+        alignment = _candidate_mechanism_gate(
+            mechanism_alignment=mechanism_alignment,
+            min_alignment_probability=min_mechanism_alignment_probability,
+            review_band=mechanism_review_band,
+        )
+        out = out.merge(alignment, on=["ticker", "commodity", "feature", "preferred_horizon"], how="left")
+        missing_alignment = out["mechanism_gate_verdict"].isna()
+        out["mechanism_gate_verdict"] = out["mechanism_gate_verdict"].fillna("review")
+        out.loc[missing_alignment, "mechanism_gate_flags"] = "missing_mechanism_alignment"
+    else:
+        out["mechanism_gate_verdict"] = "missing"
+        out["mechanism_gate_flags"] = "missing_mechanism_alignment"
+        out["mechanism_alignment_probability"] = np.nan
+        out["mechanism_alignment_aligned_share"] = np.nan
+        out["mechanism_alignment_conflict_share"] = np.nan
+        out["mechanism_alignment_observation_count"] = 0
+
+    out["candidate_gate_verdict"] = np.select(
+        [
+            out["taxonomy_verdict"].eq("block"),
+            out["taxonomy_verdict"].eq("review") | out["mechanism_gate_verdict"].ne("pass"),
+        ],
+        ["block", "review"],
+        default="pass",
+    )
+    out["candidate_gate_flags"] = (
+        out[["taxonomy_flags", "mechanism_gate_flags"]]
+        .fillna("")
+        .apply(lambda row: ",".join([value for value in row if str(value).strip()]), axis=1)
+    )
     front = [
+        "candidate_gate_verdict",
+        "candidate_gate_flags",
         "taxonomy_verdict",
         "taxonomy_flags",
         "taxonomy_issue_count",
+        "mechanism_gate_verdict",
+        "mechanism_gate_flags",
+        "mechanism_alignment_probability",
+        "mechanism_alignment_aligned_share",
+        "mechanism_alignment_conflict_share",
+        "mechanism_alignment_observation_count",
         "ticker",
         "commodity",
         "feature",
         "feature_family",
+        "feature_hypothesis_family",
         "direction",
         "exposure_role",
         "prior_weight",
@@ -742,8 +885,329 @@ def build_candidate_taxonomy_review(
     ]
     cols = [col for col in front if col in out.columns] + [col for col in out.columns if col not in front]
     return out[cols].sort_values(
-        ["taxonomy_verdict", "taxonomy_issue_count", "ticker", "commodity"],
+        ["candidate_gate_verdict", "taxonomy_issue_count", "ticker", "commodity"],
         ascending=[True, False, True, True],
+    ).reset_index(drop=True)
+
+
+def _candidate_mechanism_gate(
+    mechanism_alignment: pd.DataFrame,
+    min_alignment_probability: float,
+    review_band: float,
+) -> pd.DataFrame:
+    alignment = mechanism_alignment.copy()
+    required = {"ticker", "commodity", "feature", "horizon_days", "mechanism_alignment_probability"}
+    missing = required.difference(alignment.columns)
+    if missing:
+        raise ValueError(f"mechanism alignment is missing required columns: {sorted(missing)}")
+    alignment["ticker"] = alignment["ticker"].astype(str).str.upper().str.strip()
+    alignment["commodity"] = alignment["commodity"].astype(str).str.upper().str.strip()
+    alignment["feature"] = alignment["feature"].astype(str).str.strip()
+    alignment["preferred_horizon"] = pd.to_numeric(alignment["horizon_days"], errors="coerce").astype("Int64")
+    alignment["mechanism_alignment_probability"] = pd.to_numeric(
+        alignment["mechanism_alignment_probability"],
+        errors="coerce",
+    )
+    if "mechanism_alignment_sign" not in alignment.columns:
+        alignment["mechanism_alignment_sign"] = np.nan
+    alignment["mechanism_alignment_sign"] = pd.to_numeric(alignment["mechanism_alignment_sign"], errors="coerce")
+    if "mechanism_state" not in alignment.columns:
+        alignment["mechanism_state"] = pd.NA
+    if "mechanism_verdict" not in alignment.columns:
+        alignment["mechanism_verdict"] = pd.NA
+
+    grouped = (
+        alignment.groupby(["ticker", "commodity", "feature", "preferred_horizon"], dropna=False)
+        .agg(
+            mechanism_alignment_probability=("mechanism_alignment_probability", "mean"),
+            mechanism_alignment_min_probability=("mechanism_alignment_probability", "min"),
+            mechanism_alignment_aligned_share=("mechanism_alignment_sign", lambda s: float((s > 0).mean())),
+            mechanism_alignment_conflict_share=("mechanism_alignment_sign", lambda s: float((s < 0).mean())),
+            mechanism_alignment_observation_count=("mechanism_alignment_probability", "count"),
+            mechanism_alignment_states=(
+                "mechanism_state",
+                lambda s: ",".join(sorted(set(s.dropna().astype(str)))),
+            ),
+            mechanism_alignment_source_verdicts=(
+                "mechanism_verdict",
+                lambda s: ",".join(sorted(set(s.dropna().astype(str)))),
+            ),
+        )
+        .reset_index()
+    )
+    grouped["mechanism_gate_verdict"] = np.select(
+        [
+            grouped["mechanism_alignment_observation_count"].eq(0),
+            grouped["mechanism_alignment_probability"].ge(min_alignment_probability),
+            grouped["mechanism_alignment_probability"].ge(review_band),
+        ],
+        ["review", "pass", "review"],
+        default="conflict",
+    )
+    grouped["mechanism_gate_flags"] = ""
+    grouped.loc[grouped["mechanism_alignment_observation_count"].eq(0), "mechanism_gate_flags"] += (
+        "missing_mechanism_alignment,"
+    )
+    grouped.loc[grouped["mechanism_gate_verdict"].eq("conflict"), "mechanism_gate_flags"] += (
+        "mechanism_alignment_conflict,"
+    )
+    grouped.loc[
+        grouped["mechanism_gate_verdict"].eq("review")
+        & grouped["mechanism_alignment_observation_count"].gt(0)
+        & grouped["mechanism_alignment_probability"].lt(min_alignment_probability),
+        "mechanism_gate_flags",
+    ] += "weak_mechanism_alignment,"
+    grouped.loc[grouped["mechanism_alignment_conflict_share"].gt(0.5), "mechanism_gate_flags"] += (
+        "mostly_conflicting_mechanism_signs,"
+    )
+    grouped.loc[
+        grouped["mechanism_alignment_source_verdicts"].astype(str).str.contains("review|block", regex=True, na=False),
+        "mechanism_gate_flags",
+    ] += "mechanism_state_not_pass,"
+    grouped["mechanism_gate_flags"] = grouped["mechanism_gate_flags"].str.rstrip(",").replace("", np.nan)
+    return grouped
+
+
+def _corr_beta_stats(
+    x: pd.Series,
+    y: pd.Series,
+    min_observations: int,
+) -> dict[str, float | int]:
+    sample = pd.DataFrame({"x": x, "y": y}).replace([np.inf, -np.inf], np.nan).dropna()
+    observations = int(len(sample))
+    if observations < min_observations:
+        return {"observations": observations, "corr": np.nan, "beta": np.nan}
+    variance = float(sample["x"].var(ddof=0))
+    beta = np.nan if variance == 0 else float(sample["x"].cov(sample["y"]) / sample["x"].var())
+    return {
+        "observations": observations,
+        "corr": float(sample["x"].corr(sample["y"])),
+        "beta": beta,
+    }
+
+
+def build_nonlinear_commodity_beta_audit(
+    candidates: pd.DataFrame,
+    equity_processed: pd.DataFrame,
+    commodity_signals: pd.DataFrame | None = None,
+    exposure_map: pd.DataFrame | None = None,
+    return_column: str = "residual_return_mktsec_w12m",
+    commodity_return_column: str = "commodity_return_mktseccomm",
+    commodity_signal_return_column: str = "front_log_ret_1d",
+    lag_days: list[int] | tuple[int, ...] = (0, 1, 5, 10, 21),
+    min_observations: int = 126,
+    large_move_quantile: float = 0.80,
+    volatility_window: int = 21,
+    max_abs_lag_corr_threshold: float = 0.15,
+    asymmetry_corr_diff_threshold: float = 0.15,
+) -> pd.DataFrame:
+    if candidates.empty:
+        return candidates.copy()
+    required_candidate_cols = {"ticker", "commodity"}
+    missing_candidate_cols = required_candidate_cols.difference(candidates.columns)
+    if missing_candidate_cols:
+        raise ValueError(f"candidates is missing required columns: {sorted(missing_candidate_cols)}")
+    required_equity_cols = {"ticker", "date", return_column, commodity_return_column}
+    if commodity_signals is not None and not commodity_signals.empty:
+        required_equity_cols = {"ticker", "date", return_column}
+    missing_equity_cols = required_equity_cols.difference(equity_processed.columns)
+    if missing_equity_cols:
+        raise ValueError(f"equity_processed is missing required columns: {sorted(missing_equity_cols)}")
+
+    cand = candidates.copy()
+    cand["ticker"] = cand["ticker"].astype(str).str.upper().str.strip()
+    cand["commodity"] = cand["commodity"].astype(str).str.upper().str.strip()
+    if "feature" in cand.columns:
+        cand["feature"] = cand["feature"].astype(str).str.strip()
+    else:
+        cand["feature"] = pd.NA
+    if "feature_hypothesis_family" not in cand.columns:
+        cand["feature_hypothesis_family"] = cand["feature"].map(feature_hypothesis_family)
+
+    if exposure_map is not None and not exposure_map.empty:
+        exposure = exposure_map.copy()
+        exposure["ticker"] = exposure["ticker"].astype(str).str.upper().str.strip()
+        exposure["commodity"] = exposure["commodity"].astype(str).str.upper().str.strip()
+        exposure_cols = ["ticker", "commodity", "exposure_role", "prior_weight"]
+        cand = cand.merge(
+            exposure[[col for col in exposure_cols if col in exposure.columns]].drop_duplicates(
+                ["ticker", "commodity"]
+            ),
+            on=["ticker", "commodity"],
+            how="left",
+        )
+
+    panel = equity_processed.copy()
+    panel["ticker"] = panel["ticker"].astype(str).str.upper().str.strip()
+    panel["date"] = pd.to_datetime(panel["date"], utc=False)
+    panel[return_column] = pd.to_numeric(panel[return_column], errors="coerce")
+    if commodity_return_column in panel.columns:
+        panel[commodity_return_column] = pd.to_numeric(panel[commodity_return_column], errors="coerce")
+    if "commodity_symbol_mktseccomm" in panel.columns:
+        panel["commodity_symbol_mktseccomm"] = panel["commodity_symbol_mktseccomm"].astype(str).str.upper().str.strip()
+
+    signal_returns = pd.DataFrame()
+    if commodity_signals is not None and not commodity_signals.empty:
+        signal_col = "symbol" if "symbol" in commodity_signals.columns else "commodity"
+        required_signal_cols = {"date", signal_col, commodity_signal_return_column}
+        missing_signal_cols = required_signal_cols.difference(commodity_signals.columns)
+        if missing_signal_cols:
+            raise ValueError(f"commodity_signals is missing required columns: {sorted(missing_signal_cols)}")
+        signal_returns = commodity_signals[["date", signal_col, commodity_signal_return_column]].copy()
+        signal_returns = signal_returns.rename(
+            columns={signal_col: "commodity", commodity_signal_return_column: "_commodity_return"}
+        )
+        signal_returns["commodity"] = signal_returns["commodity"].astype(str).str.upper().str.strip()
+        signal_returns["date"] = pd.to_datetime(signal_returns["date"], utc=False)
+        signal_returns["_commodity_return"] = pd.to_numeric(signal_returns["_commodity_return"], errors="coerce")
+
+    key_cols = ["ticker", "commodity", "feature", "feature_hypothesis_family"]
+    extra_cols = [col for col in ["exposure_role", "prior_weight"] if col in cand.columns]
+    rows: list[dict[str, object]] = []
+    for key, group in cand.groupby(key_cols, dropna=False, sort=True):
+        ticker, commodity, feature, hypothesis_family = key
+        data = panel[panel["ticker"].eq(ticker)].copy()
+        if signal_returns.empty and "commodity_symbol_mktseccomm" in data.columns:
+            data = data[data["commodity_symbol_mktseccomm"].eq(commodity)].copy()
+        data = data.sort_values("date").reset_index(drop=True)
+        if data.empty:
+            rows.append(
+                {
+                    "ticker": ticker,
+                    "commodity": commodity,
+                    "feature": feature,
+                    "feature_hypothesis_family": hypothesis_family,
+                    "nonlinear_beta_verdict": "review",
+                    "nonlinear_beta_flags": "missing_return_panel",
+                }
+            )
+            continue
+
+        y = data[return_column]
+        if not signal_returns.empty:
+            commodity_returns = signal_returns[signal_returns["commodity"].eq(commodity)][
+                ["date", "_commodity_return"]
+            ]
+            data = data.merge(commodity_returns, on="date", how="left")
+            c = data["_commodity_return"]
+            active_commodity_return_column = commodity_signal_return_column
+        else:
+            c = data[commodity_return_column]
+            active_commodity_return_column = commodity_return_column
+        record: dict[str, object] = {
+            "ticker": ticker,
+            "commodity": commodity,
+            "feature": feature,
+            "feature_hypothesis_family": hypothesis_family,
+            "sample_start": data["date"].min(),
+            "sample_end": data["date"].max(),
+            "return_column": return_column,
+            "commodity_return_column": active_commodity_return_column,
+        }
+        for col in extra_cols:
+            record[col] = group[col].dropna().iloc[0] if group[col].notna().any() else np.nan
+
+        lag_records: list[tuple[int, dict[str, float | int]]] = []
+        for lag in lag_days:
+            stats = _corr_beta_stats(c.shift(lag), y, min_observations=min_observations)
+            lag_records.append((int(lag), stats))
+            record[f"lag_{int(lag)}d_observations"] = stats["observations"]
+            record[f"lag_{int(lag)}d_corr"] = stats["corr"]
+            record[f"lag_{int(lag)}d_beta"] = stats["beta"]
+
+        valid_lags = [(lag, stats) for lag, stats in lag_records if pd.notna(stats["corr"])]
+        if valid_lags:
+            max_lag, max_stats = max(valid_lags, key=lambda item: abs(float(item[1]["corr"])))
+            record["max_abs_lag_days"] = max_lag
+            record["max_abs_lag_corr"] = abs(float(max_stats["corr"]))
+            record["max_abs_lag_beta"] = max_stats["beta"]
+        else:
+            record["max_abs_lag_days"] = np.nan
+            record["max_abs_lag_corr"] = np.nan
+            record["max_abs_lag_beta"] = np.nan
+
+        up_stats = _corr_beta_stats(c.where(c > 0), y, min_observations=min_observations)
+        down_stats = _corr_beta_stats(c.where(c < 0), y, min_observations=min_observations)
+        record["commodity_up_observations"] = up_stats["observations"]
+        record["commodity_up_corr"] = up_stats["corr"]
+        record["commodity_up_beta"] = up_stats["beta"]
+        record["commodity_down_observations"] = down_stats["observations"]
+        record["commodity_down_corr"] = down_stats["corr"]
+        record["commodity_down_beta"] = down_stats["beta"]
+        record["up_down_corr_diff"] = (
+            abs(float(up_stats["corr"] - down_stats["corr"]))
+            if pd.notna(up_stats["corr"]) and pd.notna(down_stats["corr"])
+            else np.nan
+        )
+
+        abs_c = c.abs()
+        large_threshold = abs_c.quantile(large_move_quantile)
+        large_stats = _corr_beta_stats(c.where(abs_c >= large_threshold), y, min_observations=min_observations)
+        normal_stats = _corr_beta_stats(c.where(abs_c < large_threshold), y, min_observations=min_observations)
+        record["large_move_threshold"] = float(large_threshold) if pd.notna(large_threshold) else np.nan
+        record["large_move_observations"] = large_stats["observations"]
+        record["large_move_corr"] = large_stats["corr"]
+        record["large_move_beta"] = large_stats["beta"]
+        record["normal_move_observations"] = normal_stats["observations"]
+        record["normal_move_corr"] = normal_stats["corr"]
+        record["normal_move_beta"] = normal_stats["beta"]
+
+        realized_vol = c.rolling(volatility_window, min_periods=max(5, volatility_window // 2)).std()
+        vol_median = realized_vol.median()
+        high_vol_stats = _corr_beta_stats(c.where(realized_vol >= vol_median), y, min_observations=min_observations)
+        low_vol_stats = _corr_beta_stats(c.where(realized_vol < vol_median), y, min_observations=min_observations)
+        record["volatility_window"] = volatility_window
+        record["high_vol_observations"] = high_vol_stats["observations"]
+        record["high_vol_corr"] = high_vol_stats["corr"]
+        record["high_vol_beta"] = high_vol_stats["beta"]
+        record["low_vol_observations"] = low_vol_stats["observations"]
+        record["low_vol_corr"] = low_vol_stats["corr"]
+        record["low_vol_beta"] = low_vol_stats["beta"]
+
+        flags = {
+            "lagged_exposure": pd.notna(record["max_abs_lag_corr"])
+            and float(record["max_abs_lag_corr"]) >= max_abs_lag_corr_threshold,
+            "up_down_asymmetry": pd.notna(record["up_down_corr_diff"])
+            and float(record["up_down_corr_diff"]) >= asymmetry_corr_diff_threshold,
+            "large_move_exposure": pd.notna(record["large_move_corr"])
+            and abs(float(record["large_move_corr"])) >= max_abs_lag_corr_threshold,
+            "high_vol_exposure": pd.notna(record["high_vol_corr"])
+            and abs(float(record["high_vol_corr"])) >= max_abs_lag_corr_threshold,
+            "low_observations": max(int(stats["observations"]) for _, stats in lag_records) < min_observations,
+        }
+        record["nonlinear_beta_flags"] = ",".join([name for name, value in flags.items() if bool(value)])
+        record["nonlinear_beta_issue_count"] = int(sum(bool(value) for value in flags.values()))
+        record["nonlinear_beta_verdict"] = "review" if record["nonlinear_beta_issue_count"] else "pass"
+        rows.append(record)
+
+    out = pd.DataFrame(rows)
+    if out.empty:
+        return out
+    front = [
+        "nonlinear_beta_verdict",
+        "nonlinear_beta_flags",
+        "nonlinear_beta_issue_count",
+        "ticker",
+        "commodity",
+        "exposure_role",
+        "prior_weight",
+        "feature",
+        "feature_hypothesis_family",
+        "sample_start",
+        "sample_end",
+        "return_column",
+        "commodity_return_column",
+        "max_abs_lag_days",
+        "max_abs_lag_corr",
+        "max_abs_lag_beta",
+        "up_down_corr_diff",
+        "large_move_corr",
+        "high_vol_corr",
+    ]
+    cols = [col for col in front if col in out.columns] + [col for col in out.columns if col not in front]
+    return out[cols].sort_values(
+        ["nonlinear_beta_verdict", "nonlinear_beta_issue_count", "max_abs_lag_corr"],
+        ascending=[False, False, False],
     ).reset_index(drop=True)
 
 
@@ -937,8 +1401,13 @@ def consolidate_candidate_signals(
     candidates: pd.DataFrame,
     forecast_audit: pd.DataFrame | None = None,
     reviewed_features: pd.DataFrame | None = None,
+    mechanism_alignment: pd.DataFrame | None = None,
     min_confidence: str = "medium",
     require_audit_candidate: bool = False,
+    require_mechanism_pass: bool = False,
+    block_mechanism_conflicts: bool = False,
+    min_mechanism_alignment_probability: float = 0.67,
+    mechanism_review_band: float = 0.55,
     min_same_direction_share: float = 0.6,
     min_peer_direction_share: float = 0.0,
     max_per_ticker: int = 3,
@@ -958,6 +1427,18 @@ def consolidate_candidate_signals(
     out = out[out["confidence_rank"] >= min_rank].copy()
     if out.empty:
         return out
+    audit_generated_cols = [
+        "audit_verdict",
+        "audit_flags",
+        "audit_candidate",
+        "same_direction_share",
+        "same_direction_sig15_years",
+        "peer_tickers",
+        "peer_direction_share",
+        "peer_median_t",
+        "horizon_days",
+    ]
+    out = out.drop(columns=[col for col in audit_generated_cols if col in out.columns], errors="ignore")
 
     family_map: dict[str, str] = {}
     if reviewed_features is not None and not reviewed_features.empty:
@@ -1022,6 +1503,31 @@ def consolidate_candidate_signals(
     if out.empty:
         return out
 
+    if mechanism_alignment is not None and not mechanism_alignment.empty:
+        if "preferred_horizon" in out.columns:
+            out["preferred_horizon"] = pd.to_numeric(out["preferred_horizon"], errors="coerce").astype("Int64")
+        else:
+            out["preferred_horizon"] = pd.Series(pd.array([pd.NA] * len(out), dtype="Int64"), index=out.index)
+        alignment = _candidate_mechanism_gate(
+            mechanism_alignment=mechanism_alignment,
+            min_alignment_probability=min_mechanism_alignment_probability,
+            review_band=mechanism_review_band,
+        )
+        out = out.merge(alignment, on=["ticker", "commodity", "feature", "preferred_horizon"], how="left")
+        missing_alignment = out["mechanism_gate_verdict"].isna()
+        out["mechanism_gate_verdict"] = out["mechanism_gate_verdict"].fillna("review")
+        out.loc[missing_alignment, "mechanism_gate_flags"] = "missing_mechanism_alignment"
+        if require_mechanism_pass:
+            out = out[out["mechanism_gate_verdict"].eq("pass")].copy()
+        elif block_mechanism_conflicts:
+            out = out[out["mechanism_gate_verdict"].ne("conflict")].copy()
+    else:
+        out["mechanism_gate_verdict"] = "missing"
+        out["mechanism_gate_flags"] = "missing_mechanism_alignment"
+
+    if out.empty:
+        return out
+
     out["audit_rank"] = np.select(
         [out["audit_verdict"].eq("candidate"), out["audit_verdict"].eq("high_t_needs_manual_check")],
         [3, 2],
@@ -1034,6 +1540,15 @@ def consolidate_candidate_signals(
         + pd.to_numeric(out["peer_direction_share"], errors="coerce").fillna(0.5) * 5.0
         + pd.to_numeric(out["max_abs_tstat"], errors="coerce").clip(upper=8.0)
         + pd.to_numeric(out["preferred_hit_rate"], errors="coerce").fillna(0.0)
+        + np.select(
+            [
+                out["mechanism_gate_verdict"].eq("pass"),
+                out["mechanism_gate_verdict"].eq("review"),
+                out["mechanism_gate_verdict"].eq("conflict"),
+            ],
+            [10.0, 0.0, -25.0],
+            default=0.0,
+        )
     )
     out = out.sort_values(
         ["quality_score", "confidence_rank", "max_abs_tstat", "preferred_hit_rate"],
@@ -1118,6 +1633,53 @@ def audit_sensitivity_falsification_from_paths(
     return audit
 
 
+def audit_nonlinear_commodity_beta_from_paths(
+    candidates_path: Path,
+    equity_processed_path: Path,
+    commodity_signals_path: Path | None,
+    output_path: Path,
+    exposure_map_path: Path | None = None,
+    return_column: str = "residual_return_mktsec_w12m",
+    commodity_return_column: str = "commodity_return_mktseccomm",
+    commodity_signal_return_column: str = "front_log_ret_1d",
+    lag_days: list[int] | tuple[int, ...] = (0, 1, 5, 10, 21),
+    min_observations: int = 126,
+    large_move_quantile: float = 0.80,
+    volatility_window: int = 21,
+    max_abs_lag_corr_threshold: float = 0.15,
+    asymmetry_corr_diff_threshold: float = 0.15,
+) -> pd.DataFrame:
+    candidates = load_frame(candidates_path)
+    equity_processed = load_frame(equity_processed_path)
+    commodity_signals = (
+        load_frame(commodity_signals_path)
+        if commodity_signals_path is not None and commodity_signals_path.exists()
+        else pd.DataFrame()
+    )
+    exposure = (
+        pd.read_csv(exposure_map_path)
+        if exposure_map_path is not None and exposure_map_path.exists()
+        else pd.DataFrame()
+    )
+    audit = build_nonlinear_commodity_beta_audit(
+        candidates=candidates,
+        equity_processed=equity_processed,
+        commodity_signals=commodity_signals,
+        exposure_map=exposure,
+        return_column=return_column,
+        commodity_return_column=commodity_return_column,
+        commodity_signal_return_column=commodity_signal_return_column,
+        lag_days=lag_days,
+        min_observations=min_observations,
+        large_move_quantile=large_move_quantile,
+        volatility_window=volatility_window,
+        max_abs_lag_corr_threshold=max_abs_lag_corr_threshold,
+        asymmetry_corr_diff_threshold=asymmetry_corr_diff_threshold,
+    )
+    write_frame(audit, output_path)
+    return audit
+
+
 def audit_exposure_taxonomy_from_paths(
     exposure_map_path: Path,
     role_taxonomy_path: Path,
@@ -1144,14 +1706,25 @@ def review_candidate_taxonomy_from_paths(
     exposure_map_path: Path,
     role_taxonomy_path: Path,
     output_path: Path,
+    mechanism_alignment_path: Path | None = None,
+    min_mechanism_alignment_probability: float = 0.67,
+    mechanism_review_band: float = 0.55,
 ) -> pd.DataFrame:
     candidates = load_frame(candidates_path)
     exposure = pd.read_csv(exposure_map_path)
     taxonomy = pd.read_csv(role_taxonomy_path) if role_taxonomy_path.exists() else pd.DataFrame()
+    mechanism_alignment = (
+        load_frame(mechanism_alignment_path)
+        if mechanism_alignment_path is not None and mechanism_alignment_path.exists()
+        else None
+    )
     review = build_candidate_taxonomy_review(
         candidates=candidates,
         exposure_map=exposure,
         role_taxonomy=taxonomy,
+        mechanism_alignment=mechanism_alignment,
+        min_mechanism_alignment_probability=min_mechanism_alignment_probability,
+        mechanism_review_band=mechanism_review_band,
     )
     write_frame(review, output_path)
     return review
@@ -1220,8 +1793,13 @@ def consolidate_candidate_signals_from_paths(
     output_path: Path,
     forecast_audit_path: Path | None = None,
     reviewed_features_path: Path | None = None,
+    mechanism_alignment_path: Path | None = None,
     min_confidence: str = "medium",
     require_audit_candidate: bool = False,
+    require_mechanism_pass: bool = False,
+    block_mechanism_conflicts: bool = False,
+    min_mechanism_alignment_probability: float = 0.67,
+    mechanism_review_band: float = 0.55,
     min_same_direction_share: float = 0.6,
     min_peer_direction_share: float = 0.0,
     max_per_ticker: int = 3,
@@ -1233,12 +1811,22 @@ def consolidate_candidate_signals_from_paths(
         if reviewed_features_path and reviewed_features_path.exists()
         else None
     )
+    mechanism_alignment = (
+        load_frame(mechanism_alignment_path)
+        if mechanism_alignment_path is not None and mechanism_alignment_path.exists()
+        else None
+    )
     consolidated = consolidate_candidate_signals(
         candidates=candidates,
         forecast_audit=forecast_audit,
         reviewed_features=reviewed,
+        mechanism_alignment=mechanism_alignment,
         min_confidence=min_confidence,
         require_audit_candidate=require_audit_candidate,
+        require_mechanism_pass=require_mechanism_pass,
+        block_mechanism_conflicts=block_mechanism_conflicts,
+        min_mechanism_alignment_probability=min_mechanism_alignment_probability,
+        mechanism_review_band=mechanism_review_band,
         min_same_direction_share=min_same_direction_share,
         min_peer_direction_share=min_peer_direction_share,
         max_per_ticker=max_per_ticker,
