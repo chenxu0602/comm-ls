@@ -10,7 +10,7 @@ def download_yfinance_prices(
     output_dir: Path,
     start: str = "2000-01-01",
     end: str | None = None,
-    auto_adjust: bool = True,
+    auto_adjust: bool = False,
 ) -> list[Path]:
     import yfinance as yf
 

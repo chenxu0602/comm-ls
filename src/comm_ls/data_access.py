@@ -108,12 +108,13 @@ def get_equity_history(
     beta_returns_path: Path | str = DEFAULT_EQUITY_BETA_RETURNS,
     date_as_index: bool = True,
 ) -> pd.DataFrame:
-    """Return a ticker's adjusted OHLCV history from the local yfinance files.
+    """Return a ticker's local yfinance history.
 
-    The yfinance downloader in this project uses `auto_adjust=True`, so `close`,
-    `open`, `high`, and `low` are adjusted for splits/dividends where yfinance
-    provides adjusted data. By default the returned frame is indexed by `date`;
-    pass `date_as_index=False` to keep `date` as a regular column.
+    The project downloader now defaults to raw OHLCV plus `adj_close` when
+    yfinance provides it. Research returns should prefer `adj_close`; live
+    share sizing and execution price bands should use raw `close`. Older files
+    may have been downloaded with adjusted OHLC only, so refresh live target
+    tickers before producing orders.
     """
 
     safe_ticker = ticker.upper().replace("/", "-")

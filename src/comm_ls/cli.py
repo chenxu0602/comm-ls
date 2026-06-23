@@ -22,6 +22,7 @@ from comm_ls.cross_product_summary import (
 )
 from comm_ls.curve_diagnostics import build_matrix_curve_diagnostics_from_paths
 from comm_ls.equity import download_yfinance_prices
+from comm_ls.edgar import build_filing_index, download_filings, fetch_company_tickers, extract_form_sections
 from comm_ls.environment import commodity_environment_similarity_from_paths
 from comm_ls.discovery import (
     audit_commodity_universe_from_paths,
@@ -109,6 +110,11 @@ def build_parser() -> argparse.ArgumentParser:
     commodity.add_argument("--input-dir", type=Path, default=Path("data/comm/carry_data"))
     commodity.add_argument("--commodity-dir", type=Path, default=Path("data/comm"))
     commodity.add_argument("--output", type=Path, default=Path("data/processed/commodity_signals.parquet"))
+    commodity.add_argument(
+        "--no-brent-wti-features",
+        action="store_true",
+        help="Skip Brent-WTI companion features on CL rows.",
+    )
 
     download = subparsers.add_parser("download-equities")
     download.add_argument("--universe", type=Path, default=Path("config/us_commodity_equity_seed.csv"))
@@ -117,6 +123,11 @@ def build_parser() -> argparse.ArgumentParser:
     download.add_argument("--end", default=None)
     download.add_argument("--ticker", action="append", default=None)
     download.add_argument("--limit", type=int, default=None)
+    download.add_argument(
+        "--auto-adjust",
+        action="store_true",
+        help="Store adjusted OHLC only. Default stores raw OHLC plus adj_close when yfinance provides it.",
+    )
 
     quarterly = subparsers.add_parser("build-quarterly-universe")
     quarterly.add_argument("--universe", type=Path, default=Path("config/us_commodity_equity_seed.csv"))
@@ -1132,7 +1143,39 @@ def build_parser() -> argparse.ArgumentParser:
     state_summary.add_argument("--detail-output", type=Path, required=True)
     state_summary.add_argument("--min-keep-count", type=int, default=5)
     state_summary.add_argument("--keep-only", action="store_true")
+
+    edgar_sections = subparsers.add_parser("extract-edgar-sections")
+    edgar_sections.add_argument("--tickers", required=True, help="Comma-separated tickers or @filename")
+    edgar_sections.add_argument("--filings-dir", type=Path, default=Path("data/edgar_filings/filings"))
+    edgar_sections.add_argument("--output-dir", type=Path, default=Path("data/edgar_filings/sections"))
+    edgar_sections.add_argument("--form-types", default="10-K,20-F", help="Form types to process")
+    edgar_sections.add_argument("--sections", default="", help="Comma-separated sections (default: all applicable)")
+    edgar_sections.add_argument("--year", type=int, default=2025, help="Filing year")
+    edgar_sections.add_argument("--print", dest="print_stdout", action="store_true", help="Print to stdout instead of files")
     state_summary.add_argument("--top", type=int, default=50)
+
+    edgar_cache = subparsers.add_parser("build-edgar-filing-cache")
+    edgar_cache.add_argument("--tickers", default="", help="Comma-separated tickers (e.g. PSX,WLK,DOW)")
+    edgar_cache.add_argument(
+        "--tickers-file", type=Path, default=None, help="Path to file with one ticker per line"
+    )
+    edgar_cache.add_argument(
+        "--form-types", default="10-K,10-Q", help="Comma-separated form types (default: 10-K,10-Q)"
+    )
+    edgar_cache.add_argument("--start-year", type=int, default=2005)
+    edgar_cache.add_argument("--output-dir", type=Path, default=Path("data/edgar_filings"))
+    edgar_cache.add_argument(
+        "--index-cache", type=Path, default=None, help="Path to cached filing_index.csv to avoid re-scraping"
+    )
+    edgar_cache.add_argument(
+        "--skip-download", action="store_true", help="Only build the filing index, do not download filings"
+    )
+    edgar_cache.add_argument(
+        "--skip-index", action="store_true", help="Only download filings using an existing index"
+    )
+    edgar_cache.add_argument(
+        "--dry-run", action="store_true", help="Print what would be downloaded without actually downloading"
+    )
 
     return parser
 
@@ -1142,8 +1185,41 @@ def main() -> None:
     args = parser.parse_args()
 
     if args.command == "build-commodity-signals":
+        print(f"Loading carry data from {args.input_dir} ...")
         carry = load_carry_directory(args.input_dir)
-        signals = build_commodity_signal_frame(carry, commodity_dir=args.commodity_dir)
+        carry_summary = (
+            carry.groupby("symbol", sort=True)
+            .agg(rows=("date", "size"), start=("date", "min"), end=("date", "max"))
+            .reset_index()
+        )
+        for row in carry_summary.itertuples(index=False):
+            print(f"  {row.symbol}: {row.rows:,} rows, {row.start.date()} -> {row.end.date()}")
+
+        include_brent_wti = not args.no_brent_wti_features
+        print(
+            "Building commodity signal frame "
+            f"(calendar_contracts=on, brent_wti_features={'on' if include_brent_wti else 'off'}) ..."
+        )
+        signals = build_commodity_signal_frame(
+            carry,
+            commodity_dir=args.commodity_dir,
+            include_brent_wti_features=include_brent_wti,
+        )
+        if include_brent_wti:
+            brent_wti_cols = [
+                col
+                for col in signals.columns
+                if col.startswith("brent_wti_") or col.startswith("brent_minus_wti_")
+            ]
+            cl_rows = signals["symbol"].astype(str).str.upper().eq("CL")
+            if brent_wti_cols:
+                non_null = int(signals.loc[cl_rows, brent_wti_cols[0]].notna().sum())
+                print(
+                    "Added Brent-WTI companion features on CL rows: "
+                    f"{len(brent_wti_cols)} columns, {non_null:,} aligned observations"
+                )
+            else:
+                print("No Brent-WTI companion features were added.")
         write_frame(signals, args.output)
         print(f"Wrote {len(signals):,} commodity signal rows to {args.output}")
         return
@@ -1161,6 +1237,7 @@ def main() -> None:
             output_dir=args.output_dir,
             start=args.start,
             end=args.end,
+            auto_adjust=args.auto_adjust,
         )
         print(f"Wrote {len(paths):,} yfinance price files to {args.output_dir}")
         return
@@ -1287,6 +1364,14 @@ def main() -> None:
             if return_columns == ["residual_return"]
             else Path(f"data/cache/feature_return/{commodity_code}-{return_slug}.parquet")
         )
+        print(
+            f"Building {commodity_code} daily feature-return cache from {args.commodity_signals} "
+            f"and {args.beta_returns} ..."
+        )
+        print(
+            f"  feature_preset={args.feature_preset}, explicit_features={len(args.feature or [])}, "
+            f"returns={','.join(return_columns)}, output={output}"
+        )
         cache = build_daily_feature_return_cache_from_paths(
             commodity_signals_path=args.commodity_signals,
             beta_returns_path=args.beta_returns,
@@ -1300,6 +1385,12 @@ def main() -> None:
             min_observations=args.min_observations,
             include_prestandardized=args.include_prestandardized,
             return_column=return_columns,
+        )
+        feature_z_cols = [col for col in cache.columns if col.startswith("feature_z__")]
+        brent_wti_cols = [col for col in feature_z_cols if "brent_wti" in col or "brent_minus_wti" in col]
+        print(
+            f"  cache feature columns: {len(feature_z_cols)} total, "
+            f"{len(brent_wti_cols)} Brent-WTI companion columns"
         )
         print(
             f"Wrote {len(cache):,} {commodity_code} daily feature-return cache rows "
@@ -2493,6 +2584,104 @@ def main() -> None:
                 "tickers",
             ]
             print(summary[[col for col in cols if col in summary.columns]].head(args.top).to_string(index=False))
+        return
+
+    if args.command == "build-edgar-filing-cache":
+        tickers = [t.strip().upper() for t in args.tickers.split(",") if t.strip()]
+        if args.tickers_file:
+            file_tickers = [
+                line.strip().upper()
+                for line in args.tickers_file.read_text(encoding="utf-8").splitlines()
+                if line.strip() and not line.strip().startswith("#")
+            ]
+            tickers = sorted(set(tickers + file_tickers))
+        if not tickers:
+            raise ValueError("build-edgar-filing-cache requires --tickers or --tickers-file")
+        form_types = tuple(sorted({f.strip() for f in args.form_types.split(",") if f.strip()}))
+        output_dir: Path = args.output_dir
+
+        print(f"Resolving CIKs for {len(tickers)} tickers ...")
+        cik_map = fetch_company_tickers(cache_path=output_dir / "company_tickers.json")
+        found = [t for t in tickers if t in cik_map]
+        missing = [t for t in tickers if t not in cik_map]
+        if missing:
+            print(f"  Warning: {len(missing)} tickers not found in SEC CIK map: {', '.join(sorted(missing))}")
+        print(f"  Found CIKs for {len(found)}/{len(tickers)} tickers")
+
+        index_path = args.index_cache or (output_dir / "filing_index.csv")
+        if not args.skip_index:
+            print(f"Building filing index for {form_types} from {args.start_year} ...")
+            index, _ = build_filing_index(
+                tickers=found,
+                cik_map=cik_map,
+                form_types=form_types,
+                start_year=args.start_year,
+                cache_dir=output_dir,
+            )
+            output_dir.mkdir(parents=True, exist_ok=True)
+            index.to_csv(index_path, index=False)
+            print(f"  Saved {len(index)} filing entries to {index_path}")
+            for ticker in sorted(index["ticker"].unique()):
+                tdf = index[index["ticker"] == ticker]
+                print(f"    {ticker}: {len(tdf)} filings ({tdf['fiscal_year'].min():.0f}-{tdf['fiscal_year'].max():.0f})")
+        else:
+            print(f"Loading existing index from {index_path}")
+            import pandas as pd
+            index = pd.read_csv(index_path)
+            print(f"  Loaded {len(index)} filing entries")
+
+        if not args.skip_download:
+            print(f"Downloading filings to {output_dir / 'filings'} ...")
+            stats = download_filings(
+                index, output_dir, form_types=form_types, dry_run=args.dry_run
+            )
+            if args.dry_run:
+                print(
+                    f"  [DRY RUN] Would download {stats['would_download']}, "
+                    f"already cached {stats['skipped']}"
+                )
+            else:
+                print(f"  Downloaded {stats['downloaded']}, skipped {stats['skipped']}, failed {stats['failed']}")
+
+        print("Done.")
+
+    if args.command == "extract-edgar-sections":
+        tickers = [t.strip().upper() for t in args.tickers.split(",") if t.strip() and not t.strip().startswith("@")]
+        form_types = [f.strip() for f in args.form_types.split(",") if f.strip()]
+        section_ids = [s.strip() for s in args.sections.split(",") if s.strip()] if args.sections else []
+        filings_dir: Path = args.filings_dir
+        output_dir: Path = args.output_dir
+        year = args.year
+
+        output_dir.mkdir(parents=True, exist_ok=True)
+        found_any = False
+        for ticker in tickers:
+            for form_type in form_types:
+                path = filings_dir / ticker / form_type / f"{year}.txt"
+                if not path.exists():
+                    continue
+                text = path.read_text(encoding="utf-8", errors="replace")
+                sections = extract_form_sections(text, form_type, item_ids=tuple(section_ids) if section_ids else None)
+                if not sections:
+                    continue
+                found_any = True
+                ticker_out = output_dir / ticker / form_type / str(year)
+                ticker_out.mkdir(parents=True, exist_ok=True)
+                for item_id, content in sections.items():
+                    out_path = ticker_out / f"Item_{item_id}.txt"
+                    out_path.write_text(content, encoding="utf-8")
+                    if args.print_stdout:
+                        print(f"\n===== {ticker} {form_type} Item {item_id} ({len(content):,} chars) =====\n")
+                        print(content[:2000])
+                        if len(content) > 2000:
+                            print(f"\n... ({len(content) - 2000:,} more chars)")
+                    else:
+                        print(f"  {ticker:6s} {form_type:4s} Item {item_id}: {len(content):>8,d} chars -> {out_path}")
+        if not found_any:
+            print(f"No sections found for tickers={tickers} forms={form_types} year={year}")
+        else:
+            print(f"Extracted sections to {output_dir}")
+        return
         return
 
     parser.error(f"Unknown command: {args.command}")

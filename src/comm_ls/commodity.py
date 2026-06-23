@@ -578,7 +578,116 @@ def add_calendar_december_carry_features(signals: pd.DataFrame, commodity_dir: P
     return add_calendar_contract_features(signals=signals, commodity_dir=commodity_dir)
 
 
-def build_commodity_signal_frame(carry: pd.DataFrame, commodity_dir: Path | None = None) -> pd.DataFrame:
+def add_brent_wti_spread_features(
+    signals: pd.DataFrame,
+    base_symbol: str = "CL",
+    brent_symbol: str = "CO",
+) -> pd.DataFrame:
+    """Attach Brent-WTI companion features to the base WTI symbol rows.
+
+    The sign convention is always Brent minus WTI (`CO - CL`) for spreads and
+    return divergence. The resulting columns are populated only on `base_symbol`
+    rows so downstream CL feature-return caches can consume them normally.
+    """
+    out = signals.copy()
+    if out.empty or "symbol" not in out.columns:
+        return out
+
+    symbol = out["symbol"].astype(str).str.upper().str.strip()
+    base_symbol = base_symbol.upper().strip()
+    brent_symbol = brent_symbol.upper().strip()
+    if base_symbol not in set(symbol) or brent_symbol not in set(symbol):
+        return out
+
+    required = {
+        "date",
+        "front_settle",
+        "front_log_ret_1d",
+        "front_log_ret_5d",
+        "front_log_ret_21d",
+        "carry",
+        "front_second_annualized_carry",
+        "front_third_annualized_carry",
+    }
+    if required.difference(out.columns):
+        return out
+
+    optional = [
+        "calendar_dec_annualized_carry",
+        "liquid_deferred_annualized_carry",
+        "activity_deferred_annualized_carry",
+    ]
+    value_cols = sorted(required.difference({"date"})) + [col for col in optional if col in out.columns]
+
+    pair = (
+        out.loc[symbol.isin({base_symbol, brent_symbol}), ["date", "symbol", *value_cols]]
+        .copy()
+        .sort_values(["symbol", "date"])
+    )
+    pair["date"] = pd.to_datetime(pair["date"], utc=False)
+    base = pair[pair["symbol"] == base_symbol].drop(columns=["symbol"]).add_prefix("wti_")
+    brent = pair[pair["symbol"] == brent_symbol].drop(columns=["symbol"]).add_prefix("brent_")
+    joined = base.merge(brent, left_on="wti_date", right_on="brent_date", how="inner")
+    if joined.empty:
+        return out
+
+    features = pd.DataFrame({"date": joined["wti_date"]})
+    features["brent_wti_log_spread"] = _safe_log_ratio(
+        joined["brent_front_settle"],
+        joined["wti_front_settle"],
+    )
+    features["brent_wti_front_price_spread"] = joined["brent_front_settle"] / joined["wti_front_settle"] - 1.0
+    features["brent_wti_log_spread_chg_5d"] = features["brent_wti_log_spread"].diff(5)
+    features["brent_wti_log_spread_chg_21d"] = features["brent_wti_log_spread"].diff(21)
+    features["brent_wti_log_spread_z_252d"] = _rolling_z(features["brent_wti_log_spread"])
+
+    for horizon in [1, 5, 21]:
+        features[f"brent_minus_wti_front_log_ret_{horizon}d"] = (
+            joined[f"brent_front_log_ret_{horizon}d"] - joined[f"wti_front_log_ret_{horizon}d"]
+        )
+
+    carry_spread_specs = {
+        "brent_wti_carry_spread": ("brent_carry", "wti_carry"),
+        "brent_wti_front_second_annualized_carry_spread": (
+            "brent_front_second_annualized_carry",
+            "wti_front_second_annualized_carry",
+        ),
+        "brent_wti_front_third_annualized_carry_spread": (
+            "brent_front_third_annualized_carry",
+            "wti_front_third_annualized_carry",
+        ),
+        "brent_wti_calendar_dec_annualized_carry_spread": (
+            "brent_calendar_dec_annualized_carry",
+            "wti_calendar_dec_annualized_carry",
+        ),
+        "brent_wti_liquid_deferred_annualized_carry_spread": (
+            "brent_liquid_deferred_annualized_carry",
+            "wti_liquid_deferred_annualized_carry",
+        ),
+        "brent_wti_activity_deferred_annualized_carry_spread": (
+            "brent_activity_deferred_annualized_carry",
+            "wti_activity_deferred_annualized_carry",
+        ),
+    }
+    for feature_name, (brent_col, wti_col) in carry_spread_specs.items():
+        if brent_col not in joined.columns or wti_col not in joined.columns:
+            continue
+        features[feature_name] = joined[brent_col] - joined[wti_col]
+        features[f"{feature_name}_chg_21d"] = features[feature_name].diff(21)
+        features[f"{feature_name}_z_252d"] = _rolling_z(features[feature_name])
+
+    feature_cols = [col for col in features.columns if col != "date"]
+    out = out.merge(features, on="date", how="left", suffixes=("", "__brent_wti"))
+    non_base = out["symbol"].astype(str).str.upper().str.strip() != base_symbol
+    out.loc[non_base, feature_cols] = np.nan
+    return out
+
+
+def build_commodity_signal_frame(
+    carry: pd.DataFrame,
+    commodity_dir: Path | None = None,
+    include_brent_wti_features: bool = True,
+) -> pd.DataFrame:
     frames: list[pd.DataFrame] = []
 
     for symbol, group in carry.groupby("symbol", sort=True):
@@ -732,6 +841,8 @@ def build_commodity_signal_frame(carry: pd.DataFrame, commodity_dir: Path | None
     signals = pd.concat(frames, ignore_index=True)
     if commodity_dir is not None:
         signals = add_calendar_contract_features(signals, commodity_dir=commodity_dir)
+    if include_brent_wti_features:
+        signals = add_brent_wti_spread_features(signals)
     return signals.sort_values(["date", "symbol"]).reset_index(drop=True)
 
 

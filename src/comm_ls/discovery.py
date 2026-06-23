@@ -123,6 +123,25 @@ CURVE_SHOCK_VOL_FEATURES = [
     "volume_surge_63d",
     "oi_surge_63d",
     "carry_pctile_252d",
+    "brent_wti_log_spread",
+    "brent_wti_front_price_spread",
+    "brent_wti_log_spread_chg_5d",
+    "brent_wti_log_spread_chg_21d",
+    "brent_minus_wti_front_log_ret_1d",
+    "brent_minus_wti_front_log_ret_5d",
+    "brent_minus_wti_front_log_ret_21d",
+    "brent_wti_carry_spread",
+    "brent_wti_carry_spread_chg_21d",
+    "brent_wti_front_second_annualized_carry_spread",
+    "brent_wti_front_second_annualized_carry_spread_chg_21d",
+    "brent_wti_front_third_annualized_carry_spread",
+    "brent_wti_front_third_annualized_carry_spread_chg_21d",
+    "brent_wti_calendar_dec_annualized_carry_spread",
+    "brent_wti_calendar_dec_annualized_carry_spread_chg_21d",
+    "brent_wti_liquid_deferred_annualized_carry_spread",
+    "brent_wti_liquid_deferred_annualized_carry_spread_chg_21d",
+    "brent_wti_activity_deferred_annualized_carry_spread",
+    "brent_wti_activity_deferred_annualized_carry_spread_chg_21d",
 ]
 BROAD_DISCOVERY_FEATURES = [
     *CORE_PRICE_MOMENTUM_FEATURES,
@@ -550,7 +569,7 @@ def build_daily_feature_return_cache(
                     cache.loc[idx, f"fwd_residual_return_{horizon}d"] = _forward_sum(s, horizon).to_numpy()
                 cache.loc[idx, f"target_end_{horizon}d"] = dates.shift(-horizon).to_numpy()
 
-    cache = cache.merge(z, left_on="date", right_on="signal_date", how="left").drop(columns=["signal_date"])
+    cache = cache.merge(z, left_on="date", right_on="signal_date", how="left").drop(columns=["signal_date"]).copy()
     cache.insert(0, "commodity", commodity)
     cache["feature_preset"] = feature_preset
     cache["feature_z_window"] = feature_z_window

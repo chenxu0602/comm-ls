@@ -80,16 +80,21 @@ def _load_theme_hedges(path: Path) -> dict[str, str]:
 
 
 def _price_matrix(prices: pd.DataFrame) -> pd.DataFrame:
-    price_col = "adj_close" if "adj_close" in prices.columns else "close"
-    required = {"ticker", "date", price_col}
+    required = {"ticker", "date", "close"}
     missing = required.difference(prices.columns)
     if missing:
         raise ValueError(f"Price data is missing required columns: {sorted(missing)}")
 
     df = prices.copy()
     df["date"] = pd.to_datetime(df["date"], utc=False)
-    df = df.dropna(subset=[price_col])
-    matrix = df.pivot_table(index="date", columns="ticker", values=price_col, aggfunc="last")
+    df["close"] = pd.to_numeric(df["close"], errors="coerce")
+    if "adj_close" in df.columns:
+        df["adj_close"] = pd.to_numeric(df["adj_close"], errors="coerce")
+        df["_return_price"] = df["adj_close"].fillna(df["close"])
+    else:
+        df["_return_price"] = df["close"]
+    df = df.dropna(subset=["_return_price"])
+    matrix = df.pivot_table(index="date", columns="ticker", values="_return_price", aggfunc="last")
     return matrix.sort_index()
 
 
@@ -579,6 +584,10 @@ def _price_panel_with_metadata(prices: pd.DataFrame, seed: pd.DataFrame) -> pd.D
     panel["date"] = pd.to_datetime(panel["date"], utc=False)
     if "adj_close" not in panel.columns:
         panel["adj_close"] = panel[price_col]
+    elif "close" in panel.columns:
+        panel["adj_close"] = pd.to_numeric(panel["adj_close"], errors="coerce").fillna(
+            pd.to_numeric(panel["close"], errors="coerce")
+        )
 
     seed_meta = seed.copy()
     seed_meta["ticker"] = seed_meta["ticker"].astype(str).str.upper().str.strip()

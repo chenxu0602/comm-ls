@@ -1,0 +1,4 @@
+bucket,gross_weight,signed_weight,gross_notional_usd,signed_notional_usd,instrument_count
+stock_long_without_hedge,0.3,0.3,4500.0,4500.0,9
+stock_short_without_hedge,0.375,-0.375,5625.0,-5625.0,12
+total_hedge,0.485,0.485,7281.45,7281.45,3
