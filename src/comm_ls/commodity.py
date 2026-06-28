@@ -40,6 +40,8 @@ ALL_CONTRACT_MONTHS = tuple(range(1, 13))
 ACTIVE_CONTRACT_MONTHS_BY_SYMBOL = {
     # CL trades every listed month, with December usually the best fixed-calendar anchor.
     "CL": ALL_CONTRACT_MONTHS,
+    # Henry Hub natural gas trades every listed month; interpretation is seasonal.
+    "NG": ALL_CONTRACT_MONTHS,
     # Precious metals concentrate liquidity in even months.
     "GC": (2, 4, 6, 8, 10, 12),
     # SI/HG concentrate liquidity in odd months, but November is thin and December is active.
@@ -53,6 +55,9 @@ ACTIVE_CONTRACT_MONTHS_BY_SYMBOL = {
     "PT": ALL_CONTRACT_MONTHS,
 }
 LIQUID_DEFERRED_MIN_MONTHS = 6
+NG_SUMMER_MONTHS = (4, 5, 6, 7, 8, 9, 10)
+NG_WINTER_MONTHS = (11, 12, 1, 2, 3)
+NG_MIN_STRIP_MONTHS = 3
 
 
 def _rolling_z(value: pd.Series, window: int = 252, min_periods: int = 63) -> pd.Series:
@@ -393,6 +398,217 @@ def _load_contract_settles(
     return out[["date", contract_column, settle_column]]
 
 
+def _ng_season_contracts_after_front(
+    front_contract: pd.Series,
+    season_months: tuple[int, ...],
+    min_months: int = NG_MIN_STRIP_MONTHS,
+) -> tuple[pd.Series, pd.Series]:
+    """Return nearest forward NG seasonal strip with enough months after front."""
+    front_months = _contract_month_start(front_contract)
+    contract_lists: list[str | pd.NA] = []
+    midpoint_months: list[pd.Timestamp | pd.NaT] = []
+
+    for front_month in front_months:
+        if pd.isna(front_month):
+            contract_lists.append(pd.NA)
+            midpoint_months.append(pd.NaT)
+            continue
+
+        selected: list[tuple[pd.Timestamp, str]] = []
+        for year_offset in range(4):
+            season_year = front_month.year + year_offset
+            candidates: list[tuple[pd.Timestamp, str]] = []
+            for month in season_months:
+                contract_year = season_year + (1 if month <= 3 and max(season_months) == 12 else 0)
+                contract_month = pd.Timestamp(year=contract_year, month=month, day=1)
+                if contract_month > front_month:
+                    candidates.append((contract_month, _contract_for_year_month(contract_year, month)))
+            if len(candidates) >= min_months:
+                selected = candidates
+                break
+
+        if not selected:
+            contract_lists.append(pd.NA)
+            midpoint_months.append(pd.NaT)
+            continue
+
+        contract_lists.append("|".join(contract for _, contract in selected))
+        midpoint_ord = int(round(float(np.mean([month.toordinal() for month, _ in selected]))))
+        midpoint_months.append(pd.Timestamp.fromordinal(midpoint_ord))
+
+    return (
+        pd.Series(contract_lists, index=front_contract.index, dtype="string"),
+        pd.Series(midpoint_months, index=front_contract.index),
+    )
+
+
+def _strip_contract_settles(
+    symbol_dir: Path,
+    dates: pd.Series,
+    contract_lists: pd.Series,
+) -> pd.DataFrame:
+    unique_contracts = sorted(
+        {
+            contract
+            for text in contract_lists.dropna().astype(str)
+            for contract in text.split("|")
+            if contract
+        }
+    )
+    if not unique_contracts:
+        return pd.DataFrame(
+            {
+                "strip_settle": np.nan,
+                "strip_available_contracts": 0,
+            },
+            index=contract_lists.index,
+        )
+
+    settles = _load_contract_settles(
+        symbol_dir=symbol_dir,
+        contracts=pd.Series(unique_contracts, dtype="string"),
+        contract_column="contract",
+        settle_column="settle",
+    )
+    if settles.empty:
+        return pd.DataFrame(
+            {
+                "strip_settle": np.nan,
+                "strip_available_contracts": 0,
+            },
+            index=contract_lists.index,
+        )
+
+    pivot = settles.pivot_table(index="date", columns="contract", values="settle", aggfunc="last")
+    values: list[float] = []
+    counts: list[int] = []
+    for idx, contract_text in contract_lists.items():
+        if pd.isna(contract_text):
+            values.append(np.nan)
+            counts.append(0)
+            continue
+        date = pd.Timestamp(dates.loc[idx])
+        contracts = str(contract_text).split("|")
+        if date not in pivot.index:
+            values.append(np.nan)
+            counts.append(0)
+            continue
+        row = pd.to_numeric(pivot.loc[date, contracts], errors="coerce")
+        counts.append(int(row.notna().sum()))
+        values.append(float(row.mean()) if row.notna().sum() >= NG_MIN_STRIP_MONTHS else np.nan)
+
+    return pd.DataFrame(
+        {
+            "strip_settle": values,
+            "strip_available_contracts": counts,
+        },
+        index=contract_lists.index,
+    )
+
+
+def _year_fraction_to_midpoint(front_contract: pd.Series, midpoint_month: pd.Series) -> pd.Series:
+    front_month = _contract_month_start(front_contract)
+    days = (pd.to_datetime(midpoint_month, errors="coerce") - front_month).dt.days
+    return days.where(days > 0) / 365.25
+
+
+def _same_month_rolling_z(value: pd.Series, dates: pd.Series, window: int = 105, min_periods: int = 42) -> pd.Series:
+    out = pd.Series(np.nan, index=value.index, dtype=float)
+    safe_value = pd.to_numeric(value, errors="coerce")
+    month = pd.to_datetime(dates, utc=False).dt.month
+    for _, idx in month.groupby(month).groups.items():
+        s = safe_value.loc[idx]
+        mean = s.shift(1).rolling(window, min_periods=min_periods).mean()
+        std = s.shift(1).rolling(window, min_periods=min_periods).std()
+        out.loc[idx] = (s - mean) / std
+    return out
+
+
+def _same_month_rolling_pctile(
+    value: pd.Series,
+    dates: pd.Series,
+    window: int = 105,
+    min_periods: int = 42,
+) -> pd.Series:
+    out = pd.Series(np.nan, index=value.index, dtype=float)
+    safe_value = pd.to_numeric(value, errors="coerce")
+    month = pd.to_datetime(dates, utc=False).dt.month
+    for _, idx in month.groupby(month).groups.items():
+        s = safe_value.loc[idx]
+        values = s.to_numpy(dtype=float)
+        pctiles = np.full(len(values), np.nan)
+        for i, current in enumerate(values):
+            if not np.isfinite(current):
+                continue
+            start = max(0, i - window)
+            history = values[start:i]
+            history = history[np.isfinite(history)]
+            if len(history) < min_periods:
+                continue
+            pctiles[i] = float(np.mean(history <= current))
+        out.loc[idx] = pctiles
+    return out
+
+
+def add_ng_seasonal_features(signals: pd.DataFrame, commodity_dir: Path) -> pd.DataFrame:
+    out = signals.copy()
+    if out.empty or "symbol" not in out.columns:
+        return out
+
+    symbol = out["symbol"].astype(str).str.upper().str.strip()
+    if "NG" not in set(symbol):
+        return out
+
+    ng = out.loc[symbol.eq("NG")].sort_values("date").copy()
+    if ng.empty:
+        return out
+
+    for label, season_months in [
+        ("summer", NG_SUMMER_MONTHS),
+        ("winter", NG_WINTER_MONTHS),
+    ]:
+        contracts, midpoint = _ng_season_contracts_after_front(ng["M0_con"], season_months=season_months)
+        strip = _strip_contract_settles(commodity_dir / "NG", ng["date"], contracts)
+        ng[f"ng_forward_{label}_strip_contracts"] = contracts
+        ng[f"ng_forward_{label}_strip_midpoint"] = midpoint
+        ng[f"ng_forward_{label}_strip_settle"] = strip["strip_settle"]
+        ng[f"ng_forward_{label}_strip_available_contracts"] = strip["strip_available_contracts"]
+        carry_col = f"ng_forward_{label}_strip_annualized_carry"
+        ng[carry_col] = (
+            _safe_log_ratio(ng[f"ng_forward_{label}_strip_settle"], ng["front_settle"])
+            / _year_fraction_to_midpoint(ng["M0_con"], midpoint)
+        )
+        ng[f"ng_forward_{label}_strip_backwardation_steepness"] = -ng[carry_col]
+        ng[f"{carry_col}_chg_21d"] = ng[carry_col].diff(21)
+        ng[f"{carry_col}_z_252d"] = _rolling_z(ng[carry_col])
+        steep_col = f"ng_forward_{label}_strip_backwardation_steepness"
+        ng[f"{steep_col}_chg_21d"] = ng[steep_col].diff(21)
+        ng[f"{steep_col}_z_252d"] = _rolling_z(ng[steep_col])
+
+    ng["ng_winter_summer_strip_log_spread"] = _safe_log_ratio(
+        ng["ng_forward_winter_strip_settle"],
+        ng["ng_forward_summer_strip_settle"],
+    )
+    ng["ng_winter_summer_strip_spread"] = (
+        ng["ng_forward_winter_strip_settle"] / ng["ng_forward_summer_strip_settle"] - 1.0
+    )
+    ng["ng_winter_summer_strip_log_spread_chg_21d"] = ng["ng_winter_summer_strip_log_spread"].diff(21)
+    ng["ng_winter_summer_strip_log_spread_z_252d"] = _rolling_z(
+        ng["ng_winter_summer_strip_log_spread"]
+    )
+    ng["ng_winter_summer_strip_spread_chg_21d"] = ng["ng_winter_summer_strip_spread"].diff(21)
+    ng["ng_winter_summer_strip_spread_z_252d"] = _rolling_z(ng["ng_winter_summer_strip_spread"])
+    ng["ng_injection_season"] = ng["date"].dt.month.isin(NG_SUMMER_MONTHS).astype(int)
+    ng["ng_withdrawal_season"] = ng["date"].dt.month.isin(NG_WINTER_MONTHS).astype(int)
+
+    log_front = np.log(pd.to_numeric(ng["front_settle"], errors="coerce").where(ng["front_settle"] > 0))
+    ng["ng_front_settle_month_z_5y"] = _same_month_rolling_z(log_front, ng["date"])
+    ng["ng_front_settle_month_pctile_5y"] = _same_month_rolling_pctile(log_front, ng["date"])
+
+    out.loc[ng.index, ng.columns] = ng
+    return out
+
+
 def _same_contract_log_return(settle: pd.Series, contract: pd.Series, periods: int) -> pd.Series:
     value = np.log(settle.where(settle > 0)).diff(periods)
     return value.where(contract == contract.shift(periods))
@@ -519,14 +735,96 @@ def add_calendar_contract_features(signals: pd.DataFrame, commodity_dir: Path) -
             / _year_fraction_between_contracts(g["M0_con"], g["liquid_deferred_contract"])
         )
         g["liquid_deferred_backwardation_steepness"] = -g["liquid_deferred_annualized_carry"]
-        g["liquid_deferred_annualized_carry_chg_21d"] = g["liquid_deferred_annualized_carry"].diff(21)
+
+        # The deferred contract series can have sparse gaps during rolls or
+        # hand-entered fallback coverage. Forward-fill only for the change
+        # feature so the 21d delta remains continuous once the level feature
+        # resumes. The raw level feature itself is left untouched.
+        liquid_deferred_level_ffill = g["liquid_deferred_annualized_carry"].ffill()
+        g["liquid_deferred_annualized_carry_chg_21d"] = liquid_deferred_level_ffill.diff(21)
         g["liquid_deferred_annualized_carry_z_252d"] = _rolling_z(g["liquid_deferred_annualized_carry"])
         g["liquid_deferred_backwardation_steepness_chg_21d"] = (
-            g["liquid_deferred_backwardation_steepness"].diff(21)
+            (-liquid_deferred_level_ffill).diff(21)
         )
         g["liquid_deferred_backwardation_steepness_z_252d"] = _rolling_z(
             g["liquid_deferred_backwardation_steepness"]
         )
+
+        # ── calendar-anchor carry features (Mar/Jun/Sep vs next-active Dec) ──
+        for anchor_code, anchor_month, anchor_label in [
+            ("H", 3, "mar"),
+            ("M", 6, "jun"),
+            ("U", 9, "sep"),
+        ]:
+            # Anchor contract: same-year if current month < anchor month,
+            # otherwise next-year.  (Code matches CME month-letter convention.)
+            anchor_year = np.where(
+                g["date"].dt.month < anchor_month,
+                g["date"].dt.year,
+                g["date"].dt.year + 1,
+            )
+            anchor_contract_col = f"{anchor_label}_anchor_contract"
+            anchor_settle_col = f"{anchor_label}_anchor_settle"
+            g[anchor_contract_col] = (
+                pd.Series(anchor_year, index=g.index).astype(str) + anchor_code
+            )
+
+            anchor_settles = _load_contract_settles(
+                symbol_dir=commodity_dir / symbol,
+                contracts=g[anchor_contract_col],
+                contract_column=anchor_contract_col,
+                settle_column=anchor_settle_col,
+            )
+            if anchor_settles.empty:
+                g[anchor_settle_col] = np.nan
+            else:
+                g = g.merge(
+                    anchor_settles,
+                    on=["date", anchor_contract_col],
+                    how="left",
+                )
+
+            # The Dec leg must be after the selected anchor. If the anchor has
+            # rolled to next year, use next year's Dec as well.
+            rolling_dec_year = anchor_year
+            rolling_dec_contract_col = f"{anchor_label}_dec_contract"
+            rolling_dec_settle_col = f"{anchor_label}_dec_settle"
+            g[rolling_dec_contract_col] = (
+                pd.Series(rolling_dec_year, index=g.index).astype(str) + "Z"
+            )
+
+            rolling_dec_settles = _load_contract_settles(
+                symbol_dir=commodity_dir / symbol,
+                contracts=g[rolling_dec_contract_col],
+                contract_column=rolling_dec_contract_col,
+                settle_column=rolling_dec_settle_col,
+            )
+            if rolling_dec_settles.empty:
+                g[rolling_dec_settle_col] = np.nan
+            else:
+                g = g.merge(
+                    rolling_dec_settles,
+                    on=["date", rolling_dec_contract_col],
+                    how="left",
+                )
+
+            carry_col = f"{anchor_label}_dec_annualized_carry"
+            year_frac = _year_fraction_between_contracts(
+                g[anchor_contract_col], g[rolling_dec_contract_col]
+            )
+            g[carry_col] = (
+                _safe_log_ratio(g[rolling_dec_settle_col], g[anchor_settle_col])
+                / year_frac
+            )
+            g[f"{anchor_label}_dec_backwardation_steepness"] = -g[carry_col]
+            g[f"{anchor_label}_dec_annualized_carry_chg_21d"] = g[carry_col].diff(21)
+            g[f"{anchor_label}_dec_annualized_carry_z_252d"] = _rolling_z(g[carry_col])
+            g[f"{anchor_label}_dec_backwardation_steepness_chg_21d"] = (
+                g[f"{anchor_label}_dec_backwardation_steepness"].diff(21)
+            )
+            g[f"{anchor_label}_dec_backwardation_steepness_z_252d"] = _rolling_z(
+                g[f"{anchor_label}_dec_backwardation_steepness"]
+            )
 
         activity_deferred_settles = _load_contract_settles(
             symbol_dir=commodity_dir / symbol,
@@ -841,6 +1139,7 @@ def build_commodity_signal_frame(
     signals = pd.concat(frames, ignore_index=True)
     if commodity_dir is not None:
         signals = add_calendar_contract_features(signals, commodity_dir=commodity_dir)
+        signals = add_ng_seasonal_features(signals, commodity_dir=commodity_dir)
     if include_brent_wti_features:
         signals = add_brent_wti_spread_features(signals)
     return signals.sort_values(["date", "symbol"]).reset_index(drop=True)

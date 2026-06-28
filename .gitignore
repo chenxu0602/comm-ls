@@ -176,3 +176,9 @@ figures/
 
 ib_docs/
 stats/
+
+sim_results/
+*.txt
+*.csv
+tests/
+

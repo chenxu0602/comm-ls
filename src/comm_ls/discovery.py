@@ -94,6 +94,32 @@ CURVE_SHOCK_VOL_FEATURES = [
     "liquid_deferred_backwardation_steepness",
     "activity_deferred_backwardation_steepness",
     "carry",
+    "mar_dec_annualized_carry",
+    "jun_dec_annualized_carry",
+    "sep_dec_annualized_carry",
+    "mar_dec_backwardation_steepness",
+    "jun_dec_backwardation_steepness",
+    "sep_dec_backwardation_steepness",
+    "mar_dec_annualized_carry_chg_21d",
+    "jun_dec_annualized_carry_chg_21d",
+    "sep_dec_annualized_carry_chg_21d",
+    "mar_dec_backwardation_steepness_chg_21d",
+    "jun_dec_backwardation_steepness_chg_21d",
+    "sep_dec_backwardation_steepness_chg_21d",
+    "ng_forward_summer_strip_annualized_carry",
+    "ng_forward_winter_strip_annualized_carry",
+    "ng_forward_summer_strip_backwardation_steepness",
+    "ng_forward_winter_strip_backwardation_steepness",
+    "ng_forward_summer_strip_annualized_carry_chg_21d",
+    "ng_forward_winter_strip_annualized_carry_chg_21d",
+    "ng_forward_summer_strip_backwardation_steepness_chg_21d",
+    "ng_forward_winter_strip_backwardation_steepness_chg_21d",
+    "ng_winter_summer_strip_log_spread",
+    "ng_winter_summer_strip_log_spread_chg_21d",
+    "ng_winter_summer_strip_spread",
+    "ng_winter_summer_strip_spread_chg_21d",
+    "ng_front_settle_month_z_5y",
+    "ng_front_settle_month_pctile_5y",
     "carry_chg_5d",
     "carry_chg_21d",
     "front_second_spread_chg_21d",
@@ -519,6 +545,7 @@ def build_daily_feature_return_cache(
     z = aligned[["signal_date", "commodity_feature_date", "commodity_arrival"]].copy()
     for feature in feature_columns:
         value = pd.to_numeric(aligned[feature], errors="coerce")
+        z[f"feature_value__{feature}"] = value
         mean = value.rolling(feature_z_window, min_periods=min_feature_observations).mean()
         std = value.rolling(feature_z_window, min_periods=min_feature_observations).std()
         z[f"feature_z__{feature}"] = (value - mean) / std
