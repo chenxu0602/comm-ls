@@ -11,6 +11,7 @@ import pandas as pd
 # carry forward. Dates absent from the commodity calendar may still inherit the
 # latest valid observation.
 RESET_ON_EXPLICIT_NAN_FEATURES = frozenset({"calendar_dec_annualized_carry"})
+CL_V32_MAX_SINGLE_NAME_WEIGHT = 0.05
 
 
 @dataclass(frozen=True)
@@ -237,14 +238,15 @@ def build_stock_weights(
     features: pd.DataFrame,
     config: dict[str, SleeveConfig],
     availability: pd.DataFrame | None = None,
+    max_single_name_weight: float | None = CL_V32_MAX_SINGLE_NAME_WEIGHT,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """Build notebook-equivalent ticker weights on a shared market calendar."""
+    """Build capped notebook-equivalent ticker weights on a shared market calendar."""
     validate_config(config)
+    if max_single_name_weight is not None and max_single_name_weight <= 0:
+        raise ValueError("max_single_name_weight must be positive or None")
     stock_weights: dict[str, pd.Series] = {}
-    component_weights: dict[str, pd.Series] = {}
 
     for sleeve, cfg in config.items():
-        sleeve_weights = []
         for ticker in cfg.tickers:
             ticker_feature = features[cfg.feature]
             present = None
@@ -262,14 +264,16 @@ def build_stock_weights(
 
             weight = ticker_pos * cfg.internal_weights[ticker] * cfg.weight
             stock_weights[f"{sleeve}:{ticker}"] = weight
-            sleeve_weights.append(weight.abs())
 
-        component_weights[sleeve] = pd.concat(sleeve_weights, axis=1).sum(axis=1)
+    weights = pd.DataFrame(stock_weights, index=features.index).fillna(0.0)
+    if max_single_name_weight is not None:
+        weights = weights.clip(-max_single_name_weight, max_single_name_weight)
 
-    return (
-        pd.DataFrame(stock_weights, index=features.index).fillna(0.0),
-        pd.DataFrame(component_weights, index=features.index).fillna(0.0),
-    )
+    component_weights = {
+        sleeve: weights[[col for col in weights if col.startswith(f"{sleeve}:")]].abs().sum(axis=1)
+        for sleeve in config
+    }
+    return weights, pd.DataFrame(component_weights, index=features.index).fillna(0.0)
 
 
 validate_config(CL_V32_SLEEVE_CONFIG)
