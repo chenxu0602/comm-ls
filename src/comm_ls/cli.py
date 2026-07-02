@@ -2644,6 +2644,7 @@ def main() -> None:
                 print(f"  Downloaded {stats['downloaded']}, skipped {stats['skipped']}, failed {stats['failed']}")
 
         print("Done.")
+        return
 
     if args.command == "extract-edgar-sections":
         tickers = [t.strip().upper() for t in args.tickers.split(",") if t.strip() and not t.strip().startswith("@")]

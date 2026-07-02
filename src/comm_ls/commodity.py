@@ -59,6 +59,11 @@ NG_SUMMER_MONTHS = (4, 5, 6, 7, 8, 9, 10)
 NG_WINTER_MONTHS = (11, 12, 1, 2, 3)
 NG_MIN_STRIP_MONTHS = 3
 
+# Bloomberg HG contract files are stored in cents/lb while the hand-entered
+# CME fallback uses dollars/lb. Normalize only at ingestion; raw sources retain
+# their native vendor units.
+LIVE_PRICE_SCALE_BY_SYMBOL = {"HG": 100.0}
+
 
 def _rolling_z(value: pd.Series, window: int = 252, min_periods: int = 63) -> pd.Series:
     mean = value.rolling(window, min_periods=min_periods).mean()
@@ -91,6 +96,16 @@ def _contract_month_start(contract: pd.Series) -> pd.Series:
 
 def _contract_for_year_month(year: int, month: int) -> str:
     return f"{year}{FUTURES_MONTH_NUMBERS[month]}"
+
+
+def _next_contract_for_month(front_contract: pd.Series, month: int) -> pd.Series:
+    """Return the first named calendar-month contract strictly after M0."""
+    if month not in FUTURES_MONTH_NUMBERS:
+        raise ValueError(f"Invalid futures contract month: {month}")
+    front_month = _contract_month_start(front_contract)
+    year = front_month.dt.year + front_month.dt.month.ge(month).astype("Int64")
+    contract = year.astype("Int64").astype("string") + FUTURES_MONTH_NUMBERS[month]
+    return contract.where(front_month.notna()).astype("string")
 
 
 def _liquid_deferred_contract(
@@ -126,6 +141,7 @@ def _normalize_contract_market_data(
     df: pd.DataFrame,
     contract: str | None = None,
     source_priority: int = 0,
+    price_scale: float = 1.0,
 ) -> pd.DataFrame:
     required = {"date", "px_settle", "px_last"}
     if required.difference(df.columns):
@@ -142,7 +158,7 @@ def _normalize_contract_market_data(
 
     settle = pd.to_numeric(out["px_settle"], errors="coerce")
     last = pd.to_numeric(out["px_last"], errors="coerce")
-    out["settle"] = settle.fillna(last)
+    out["settle"] = settle.fillna(last) * price_scale
     out["volume"] = pd.to_numeric(out["volume"], errors="coerce") if "volume" in out.columns else np.nan
     out["open_interest"] = pd.to_numeric(out["open int"], errors="coerce") if "open int" in out.columns else np.nan
     out["source_priority"] = source_priority
@@ -173,7 +189,11 @@ def _load_contract_market_data(symbol_dir: Path) -> pd.DataFrame:
 
     live_path = _live_contract_market_data_path(symbol_dir)
     if live_path.exists():
-        normalized = _normalize_contract_market_data(pd.read_csv(live_path), source_priority=1)
+        normalized = _normalize_contract_market_data(
+            pd.read_csv(live_path),
+            source_priority=1,
+            price_scale=LIVE_PRICE_SCALE_BY_SYMBOL.get(symbol_dir.name.upper(), 1.0),
+        )
         if not normalized.empty:
             frames.append(normalized)
 
@@ -252,6 +272,16 @@ def _year_fraction_between_contracts(front_contract: pd.Series, deferred_contrac
     deferred_month = _contract_month_start(deferred_contract)
     days = (deferred_month - front_month).dt.days
     return days.where(days > 0) / 365.25
+
+
+def _month_gap_between_contracts(front_contract: pd.Series, deferred_contract: pd.Series) -> pd.Series:
+    front_month = _contract_month_start(front_contract)
+    deferred_month = _contract_month_start(deferred_contract)
+    gap = (
+        (deferred_month.dt.year - front_month.dt.year) * 12
+        + (deferred_month.dt.month - front_month.dt.month)
+    )
+    return gap.where(gap > 0)
 
 
 def _annualized_log_spread(
@@ -350,6 +380,7 @@ def load_carry_file(path: Path) -> pd.DataFrame:
     df["symbol"] = path.stem
     df["date"] = pd.to_datetime(df["date"], utc=False)
     df["arrival"] = pd.to_datetime(df["arrival"], utc=False)
+    df = df.sort_values("date").reset_index(drop=True)
 
     text_cols = {"symbol", "date", "arrival", "M0_con", "M1_con", "M2_con"}
     numeric_cols = [col for col in df.columns if col not in text_cols]
@@ -357,7 +388,31 @@ def load_carry_file(path: Path) -> pd.DataFrame:
     for col in ["M0_con", "M1_con", "M2_con"]:
         if col in df.columns:
             df[col] = df[col].astype("string").str.strip().str.upper()
-    return df.sort_values("date").reset_index(drop=True)
+    scale = LIVE_PRICE_SCALE_BY_SYMBOL.get(path.stem.upper())
+    if scale is not None:
+        settle_columns = [column for column in ("M0_settle", "M1_settle", "M2_settle") if column in df]
+        live_unit_rows = pd.concat(
+            [df[column].abs().lt(20.0) & df[column].notna() for column in settle_columns],
+            axis=1,
+        ).any(axis=1)
+        for column in [*settle_columns, "high", "low"]:
+            if column in df.columns:
+                df.loc[live_unit_rows, column] = df.loc[live_unit_rows, column] * scale
+
+        # The carry files may already contain returns calculated across the
+        # vendor-unit boundary. Repair only normalized live rows and preserve
+        # the source return convention elsewhere.
+        for leg in ("m0", "m1", "m2"):
+            settle_column = f"{leg.upper()}_settle"
+            contract_column = f"{leg.upper()}_con"
+            return_column = f"{leg}_ret"
+            if {settle_column, contract_column, return_column}.issubset(df.columns):
+                settle = pd.to_numeric(df[settle_column], errors="coerce")
+                recomputed = np.log(settle.where(settle > 0)).diff().where(
+                    df[contract_column].eq(df[contract_column].shift(1))
+                )
+                df.loc[live_unit_rows, return_column] = recomputed.loc[live_unit_rows]
+    return df
 
 
 def load_carry_directory(input_dir: Path) -> pd.DataFrame:
@@ -385,7 +440,11 @@ def _load_contract_settles(
 
     live_path = _live_contract_market_data_path(symbol_dir)
     if live_path.exists():
-        live = _normalize_contract_market_data(pd.read_csv(live_path), source_priority=1)
+        live = _normalize_contract_market_data(
+            pd.read_csv(live_path),
+            source_priority=1,
+            price_scale=LIVE_PRICE_SCALE_BY_SYMBOL.get(symbol_dir.name.upper(), 1.0),
+        )
         keep_contracts = set(contracts.dropna().astype(str).str.upper())
         live = live[live["contract"].isin(keep_contracts)].copy()
         if not live.empty:
@@ -620,6 +679,7 @@ def add_calendar_contract_features(signals: pd.DataFrame, commodity_dir: Path) -
         g = group.sort_values("date").copy()
         g["calendar_dec_contract"] = g["date"].dt.year.astype(str) + "Z"
         g["next_jun_contract"] = (g["date"].dt.year + 1).astype(str) + "M"
+        g["next_dec_contract_v2"] = _next_contract_for_month(g["M0_con"], month=12)
         g["liquid_deferred_contract"] = _liquid_deferred_contract(g["M0_con"], symbol=symbol)
         activity_deferred = _activity_deferred_contract(
             dates=g["date"],
@@ -667,6 +727,58 @@ def add_calendar_contract_features(signals: pd.DataFrame, commodity_dir: Path) -
             g["calendar_dec_contract"],
             periods=21,
         )
+
+        next_dec_settles_v2 = _load_contract_settles(
+            symbol_dir=commodity_dir / symbol,
+            contracts=g["next_dec_contract_v2"],
+            contract_column="next_dec_contract_v2",
+            settle_column="next_dec_settle_v2",
+        )
+        if next_dec_settles_v2.empty:
+            g["next_dec_settle_v2"] = np.nan
+        else:
+            g = g.merge(next_dec_settles_v2, on=["date", "next_dec_contract_v2"], how="left")
+
+        for periods in (1, 5, 21):
+            g[f"next_dec_log_ret_{periods}d_v2"] = _same_contract_log_return(
+                g["next_dec_settle_v2"],
+                g["next_dec_contract_v2"],
+                periods=periods,
+            )
+        next_dec_year_fraction_v2 = _year_fraction_between_contracts(
+            g["M0_con"], g["next_dec_contract_v2"]
+        )
+        g["next_dec_month_gap_v2"] = _month_gap_between_contracts(
+            g["M0_con"], g["next_dec_contract_v2"]
+        )
+        g["next_dec_annualized_carry_v2"] = (
+            _safe_log_ratio(g["next_dec_settle_v2"], g["front_settle"])
+            / next_dec_year_fraction_v2
+        )
+        g["next_dec_backwardation_steepness_v2"] = -g["next_dec_annualized_carry_v2"]
+        g["next_dec_annualized_carry_chg_21d_v2"] = g["next_dec_annualized_carry_v2"].diff(21)
+        g["next_dec_annualized_carry_z_252d_v2"] = _rolling_z(g["next_dec_annualized_carry_v2"])
+        g["next_dec_backwardation_steepness_chg_21d_v2"] = g[
+            "next_dec_backwardation_steepness_v2"
+        ].diff(21)
+        g["next_dec_backwardation_steepness_z_252d_v2"] = _rolling_z(
+            g["next_dec_backwardation_steepness_v2"]
+        )
+        for max_gap in (3, 6, 9):
+            suffix = f"gap_le_{max_gap}m_v2"
+            in_gap = g["next_dec_month_gap_v2"].le(max_gap)
+            carry_col = f"next_dec_annualized_carry_{suffix}"
+            backwardation_col = f"next_dec_backwardation_steepness_{suffix}"
+            g[carry_col] = g["next_dec_annualized_carry_v2"].where(in_gap)
+            g[backwardation_col] = -g[carry_col]
+            g[f"next_dec_annualized_carry_chg_21d_{suffix}"] = g[carry_col].diff(21)
+            g[f"next_dec_annualized_carry_z_252d_{suffix}"] = _rolling_z(g[carry_col])
+            g[f"next_dec_backwardation_steepness_chg_21d_{suffix}"] = g[
+                backwardation_col
+            ].diff(21)
+            g[f"next_dec_backwardation_steepness_z_252d_{suffix}"] = _rolling_z(
+                g[backwardation_col]
+            )
 
         next_jun_settles = _load_contract_settles(
             symbol_dir=commodity_dir / symbol,
@@ -824,6 +936,57 @@ def add_calendar_contract_features(signals: pd.DataFrame, commodity_dir: Path) -
             )
             g[f"{anchor_label}_dec_backwardation_steepness_z_252d"] = _rolling_z(
                 g[f"{anchor_label}_dec_backwardation_steepness"]
+            )
+
+            anchor_contract_v2 = f"{anchor_label}_anchor_contract_v2"
+            anchor_settle_v2 = f"{anchor_label}_anchor_settle_v2"
+            dec_contract_v2 = f"{anchor_label}_dec_contract_v2"
+            dec_settle_v2 = f"{anchor_label}_dec_settle_v2"
+            g[anchor_contract_v2] = _next_contract_for_month(g["M0_con"], month=anchor_month)
+            anchor_year_v2 = pd.to_numeric(
+                g[anchor_contract_v2].str.extract(r"^(\d{4})", expand=False),
+                errors="coerce",
+            ).astype("Int64")
+            g[dec_contract_v2] = (anchor_year_v2.astype("string") + "Z").where(
+                anchor_year_v2.notna()
+            )
+
+            anchor_settles_v2 = _load_contract_settles(
+                symbol_dir=commodity_dir / symbol,
+                contracts=g[anchor_contract_v2],
+                contract_column=anchor_contract_v2,
+                settle_column=anchor_settle_v2,
+            )
+            if anchor_settles_v2.empty:
+                g[anchor_settle_v2] = np.nan
+            else:
+                g = g.merge(anchor_settles_v2, on=["date", anchor_contract_v2], how="left")
+
+            dec_settles_v2 = _load_contract_settles(
+                symbol_dir=commodity_dir / symbol,
+                contracts=g[dec_contract_v2],
+                contract_column=dec_contract_v2,
+                settle_column=dec_settle_v2,
+            )
+            if dec_settles_v2.empty:
+                g[dec_settle_v2] = np.nan
+            else:
+                g = g.merge(dec_settles_v2, on=["date", dec_contract_v2], how="left")
+
+            carry_v2 = f"{anchor_label}_dec_annualized_carry_v2"
+            backwardation_v2 = f"{anchor_label}_dec_backwardation_steepness_v2"
+            year_fraction_v2 = _year_fraction_between_contracts(
+                g[anchor_contract_v2], g[dec_contract_v2]
+            )
+            g[carry_v2] = _safe_log_ratio(g[dec_settle_v2], g[anchor_settle_v2]) / year_fraction_v2
+            g[backwardation_v2] = -g[carry_v2]
+            g[f"{anchor_label}_dec_annualized_carry_chg_21d_v2"] = g[carry_v2].diff(21)
+            g[f"{anchor_label}_dec_annualized_carry_z_252d_v2"] = _rolling_z(g[carry_v2])
+            g[f"{anchor_label}_dec_backwardation_steepness_chg_21d_v2"] = g[
+                backwardation_v2
+            ].diff(21)
+            g[f"{anchor_label}_dec_backwardation_steepness_z_252d_v2"] = _rolling_z(
+                g[backwardation_v2]
             )
 
         activity_deferred_settles = _load_contract_settles(
@@ -996,6 +1159,11 @@ def build_commodity_signal_frame(
         m0_ret = g["m0_ret"] if "m0_ret" in g.columns else front.pct_change()
         m1_ret = g["m1_ret"] if "m1_ret" in g.columns else second.pct_change()
         m2_ret = g["m2_ret"] if "m2_ret" in g.columns else third.pct_change()
+        m0_log_ret_v2 = pd.to_numeric(m0_ret, errors="coerce")
+        front_log_ret_v2 = {
+            periods: m0_log_ret_v2.rolling(periods, min_periods=periods).sum()
+            for periods in (5, 21, 42, 63)
+        }
         front_log_ret_1d = np.log(front.where(front > 0)).diff()
         is_contango = g["contango"] > g["backwardation"]
         is_backwardation = g["backwardation"] > g["contango"]
@@ -1043,14 +1211,26 @@ def build_commodity_signal_frame(
                 "m1_ret_1d": m1_ret,
                 "m2_ret_1d": m2_ret,
                 "front_log_ret_1d": front_log_ret_1d,
+                "front_log_ret_1d_v2": m0_log_ret_v2,
                 "ret_5d": front.pct_change(5),
                 "ret_21d": front.pct_change(21),
                 "ret_42d": front.pct_change(42),
                 "ret_63d": front.pct_change(63),
+                "ret_5d_v2": np.expm1(front_log_ret_v2[5]),
+                "ret_21d_v2": np.expm1(front_log_ret_v2[21]),
+                "ret_42d_v2": np.expm1(front_log_ret_v2[42]),
+                "ret_63d_v2": np.expm1(front_log_ret_v2[63]),
                 "front_log_ret_5d": np.log(front.where(front > 0)).diff(5),
                 "front_log_ret_21d": np.log(front.where(front > 0)).diff(21),
                 "front_log_ret_63d": np.log(front.where(front > 0)).diff(63),
+                "front_log_ret_5d_v2": front_log_ret_v2[5],
+                "front_log_ret_21d_v2": front_log_ret_v2[21],
+                "front_log_ret_42d_v2": front_log_ret_v2[42],
+                "front_log_ret_63d_v2": front_log_ret_v2[63],
                 "ret_accel_21d_vs_63d": front.pct_change(21) - front.pct_change(63) / 3.0,
+                "ret_accel_21d_vs_63d_v2": (
+                    np.expm1(front_log_ret_v2[21]) - np.expm1(front_log_ret_v2[63]) / 3.0
+                ),
                 "up_days_21d": (m0_ret > 0).rolling(21, min_periods=10).mean(),
                 "drawdown_63d": front / front.rolling(63, min_periods=21).max() - 1.0,
                 "breakout_252d": front / front.rolling(252, min_periods=63).max() - 1.0,

@@ -34,6 +34,7 @@ def _category_for(feature: str) -> str:
         return "term_structure_regime"
     if (
         "calendar_dec_log_ret" in feature
+        or "next_dec_log_ret" in feature
         or "next_jun_log_ret" in feature
         or "liquid_deferred_log_ret" in feature
     ):
