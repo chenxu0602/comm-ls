@@ -42,6 +42,11 @@ ACTIVE_CONTRACT_MONTHS_BY_SYMBOL = {
     "CL": ALL_CONTRACT_MONTHS,
     # Henry Hub natural gas trades every listed month; interpretation is seasonal.
     "NG": ALL_CONTRACT_MONTHS,
+    # NY Harbor ULSD/heating oil and RBOB gasoline list every delivery month.
+    # Product-specific seasonality is handled in feature interpretation rather
+    # than by excluding contract months.
+    "HO": ALL_CONTRACT_MONTHS,
+    "XB": ALL_CONTRACT_MONTHS,
     # Precious metals concentrate liquidity in even months.
     "GC": (2, 4, 6, 8, 10, 12),
     # SI/HG concentrate liquidity in odd months, but November is thin and December is active.

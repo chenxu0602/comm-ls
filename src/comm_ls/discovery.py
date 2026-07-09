@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from time import perf_counter
 
 import numpy as np
 import pandas as pd
@@ -49,6 +50,9 @@ CORE_PRICE_MOMENTUM_FEATURES = [
     "ret_42d",
     "ret_63d",
     "ret_accel_21d_vs_63d",
+    # Exact contract-chain-safe sum of five daily M0 log returns. This is the
+    # arrival-aligned counterpart of m0_ret.rolling(5).sum() used in notebooks.
+    "front_log_ret_5d_v2",
     "ret_5d_v2",
     "ret_21d_v2",
     "ret_42d_v2",
@@ -1039,6 +1043,13 @@ def write_quarterly_stock_feature_matrix_files(
     verbose: bool = False,
     progress_interval: int = 25,
 ) -> pd.DataFrame:
+    prepare_started = perf_counter()
+    if verbose:
+        print(
+            f"[build-quarterly-stock-feature-matrix] preparing commodity={commodity}; "
+            f"cache_rows={len(cache):,}; cache_columns={len(cache.columns):,}",
+            flush=True,
+        )
     commodity = commodity.upper().strip()
     lookback_years = lookback_years or DEFAULT_DISCOVERY_SAMPLE_YEARS
     horizons = horizons or DEFAULT_DISCOVERY_HORIZONS
@@ -1072,6 +1083,14 @@ def write_quarterly_stock_feature_matrix_files(
         for ticker, group in cache.groupby("ticker", sort=True)
     }
 
+    if verbose:
+        print(
+            f"[build-quarterly-stock-feature-matrix] prepared "
+            f"tickers={len(cache_by_ticker):,}; features={len(feature_z_cols):,}; "
+            f"elapsed={perf_counter() - prepare_started:.1f}s",
+            flush=True,
+        )
+
     output_dir.mkdir(parents=True, exist_ok=True)
     manifest_rows: list[dict[str, object]] = []
     total_jobs = len(quarters) * len(lookback_years)
@@ -1080,12 +1099,20 @@ def write_quarterly_stock_feature_matrix_files(
         print(
             f"[build-quarterly-stock-feature-matrix] start commodity={commodity}; "
             f"quarters={len(quarters)}; lookbacks={lookback_years}; horizons={horizons}; "
-            f"targets={target_return_columns}; output_dir={output_dir}"
+            f"targets={target_return_columns}; output_dir={output_dir}",
+            flush=True,
         )
     for quarter, quarter_start, asof_date in quarters:
         active_tickers = active_by_quarter.get(quarter, [])
         for years in lookback_years:
             job_count += 1
+            job_started = perf_counter()
+            if verbose:
+                print(
+                    f"[build-quarterly-stock-feature-matrix] computing {job_count}/{total_jobs}; "
+                    f"quarter={quarter}; lookback={years}Y; active_tickers={len(active_tickers):,}",
+                    flush=True,
+                )
             rows: list[dict[str, object]] = []
             for ticker in active_tickers:
                 ticker_cache = cache_by_ticker.get(ticker)
@@ -1132,7 +1159,9 @@ def write_quarterly_stock_feature_matrix_files(
             if verbose and (job_count == 1 or job_count % progress_interval == 0 or job_count == total_jobs):
                 print(
                     f"[build-quarterly-stock-feature-matrix] wrote {job_count}/{total_jobs} "
-                    f"files; quarter={quarter}; lookback={years}Y; rows={len(matrix):,}"
+                    f"files; quarter={quarter}; lookback={years}Y; rows={len(matrix):,}; "
+                    f"elapsed={perf_counter() - job_started:.1f}s",
+                    flush=True,
                 )
     return pd.DataFrame(manifest_rows)
 
@@ -1179,11 +1208,30 @@ def write_quarterly_stock_feature_matrix_files_from_paths(
 ) -> pd.DataFrame:
     target_return_columns = target_return_columns or ["residual_return"]
     horizons = horizons or DEFAULT_DISCOVERY_HORIZONS
+    load_started = perf_counter()
+    if verbose:
+        cache_size_mb = cache_path.stat().st_size / (1024 * 1024)
+        print(
+            f"[build-quarterly-stock-feature-matrix] loading cache={cache_path} "
+            f"size={cache_size_mb:,.1f}MB",
+            flush=True,
+        )
     cache = _load_quarterly_matrix_cache_columns(
         cache_path=cache_path,
         target_return_columns=target_return_columns,
         horizons=horizons,
     )
+    if verbose:
+        print(
+            f"[build-quarterly-stock-feature-matrix] loaded cache "
+            f"rows={len(cache):,}; columns={len(cache.columns):,}; "
+            f"elapsed={perf_counter() - load_started:.1f}s",
+            flush=True,
+        )
+        print(
+            f"[build-quarterly-stock-feature-matrix] loading universe={broad_universe_path}",
+            flush=True,
+        )
     manifest = write_quarterly_stock_feature_matrix_files(
         cache=cache,
         broad_universe=load_frame(broad_universe_path),
