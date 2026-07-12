@@ -61,7 +61,7 @@ CL_V32_SLEEVE_CONFIG: dict[str, SleeveConfig] = {
     ),
     "refiner": SleeveConfig(
         weight=0.10,
-        tickers=("DINO", "DK"),
+        tickers=("DINO", "DK", "PBF"),
         feature_symbol="HO",
         feature="front_third_annualized_carry_chg_21d",
         threshold=0.01,
@@ -70,7 +70,7 @@ CL_V32_SLEEVE_CONFIG: dict[str, SleeveConfig] = {
         hold_days=None,
         rolling_days=5,
         sector_hedge="XLE",
-        internal_weights={"DK": 0.60, "DINO": 0.40},
+        internal_weights={"DK": 0.40, "DINO": 0.30, "PBF": 0.30},
     ),
     "fuel": SleeveConfig(
         weight=0.04,
