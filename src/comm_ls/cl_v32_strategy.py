@@ -23,6 +23,10 @@ CHEMICAL_SHORT_EXIT_LEVEL = -0.05
 SHIPPING_CARRY_CHANGE_LOOKBACK_DAYS = 20
 SHIPPING_CARRY_CHANGE_RESET_LEVEL = 0.01
 SHIPPING_MOMENTUM_FEATURE = "front_log_ret_5d_v2"
+SERVICE_VOL_LOOKBACK_DAYS = 60
+SERVICE_VOL_MIN_PERIODS = 30
+SERVICE_ENTRY_VOL_MULTIPLE = 2.0
+SERVICE_EXIT_VOL_MULTIPLE = 1.0
 
 
 @dataclass(frozen=True)
@@ -75,28 +79,29 @@ CL_V32_SLEEVE_CONFIG: dict[str, SleeveConfig] = {
     "fuel": SleeveConfig(
         weight=0.04,
         tickers=("MUSA", "CASY"),
-        feature_symbol="CL",
-        feature="front_third_spread",
-        threshold=0.01,
-        side_mult=1,
+        feature_symbol="XB",
+        feature="front_third_annualized_carry",
+        threshold=0.06,
+        side_mult=-1,
         position_mode="fixed_hold",
-        hold_days=21,
+        hold_days=10,
         rolling_days=None,
         sector_hedge=None,
-        internal_weights={"MUSA": 0.60, "CASY": 0.40},
+        internal_weights={"MUSA": 0.40, "CASY": 0.60},
     ),
     "services": SleeveConfig(
         weight=0.10,
-        tickers=("FTI", "OII"),
+        tickers=("FTI", "OII", "SLB", "HAL"),
         feature_symbol="CL",
         feature="carry_chg_21d",
-        threshold=0.01,
+        threshold=0.10,
         side_mult=-1,
         position_mode="rolling_mean",
         hold_days=None,
         rolling_days=2,
         sector_hedge="XLE",
-        internal_weights={"FTI": 0.60, "OII": 0.40},
+        internal_weights={"FTI": 0.25, "OII": 0.25, "SLB": 0.25, "HAL": 0.25},
+        signal_rule="service_volatility_hysteresis",
     ),
     "shipping": SleeveConfig(
         weight=0.25,
@@ -184,7 +189,12 @@ def validate_config(config: dict[str, SleeveConfig]) -> None:
             raise ValueError(f"{sleeve} rolling_mean mode requires rolling_days")
         if cfg.position_mode not in {"sign", "fixed_hold", "rolling_mean"}:
             raise ValueError(f"{sleeve} has unknown position mode {cfg.position_mode}")
-        if cfg.signal_rule not in {"hysteresis", "chemical_inflection", "shipping_sticky"}:
+        if cfg.signal_rule not in {
+            "hysteresis",
+            "chemical_inflection",
+            "shipping_sticky",
+            "service_volatility_hysteresis",
+        }:
             raise ValueError(f"{sleeve} has unknown signal rule {cfg.signal_rule}")
         if cfg.signal_rule == "shipping_sticky" and SHIPPING_MOMENTUM_FEATURE not in cfg.auxiliary_features:
             raise ValueError(f"{sleeve} shipping_sticky rule requires {SHIPPING_MOMENTUM_FEATURE}")
@@ -292,6 +302,27 @@ def shipping_sticky_signal(carry: pd.Series, momentum: pd.Series) -> pd.Series:
     return state_update.ffill().fillna(0.0)
 
 
+def service_volatility_hysteresis_signal(feature: pd.Series, cfg: SleeveConfig) -> pd.Series:
+    """Build the notebook's volatility-scaled CL carry-change state for services."""
+    value = pd.to_numeric(feature, errors="coerce")
+    volatility = value.rolling(
+        SERVICE_VOL_LOOKBACK_DAYS,
+        min_periods=SERVICE_VOL_MIN_PERIODS,
+    ).std()
+    long_state = pd.Series(np.nan, index=value.index, dtype=float)
+    short_state = pd.Series(np.nan, index=value.index, dtype=float)
+
+    long_state.loc[value > volatility * SERVICE_ENTRY_VOL_MULTIPLE] = float(cfg.side_mult)
+    long_state.loc[value < -volatility * SERVICE_EXIT_VOL_MULTIPLE] = 0.0
+    short_state.loc[value < -volatility * SERVICE_ENTRY_VOL_MULTIPLE] = float(-cfg.side_mult)
+    short_state.loc[value > volatility * SERVICE_EXIT_VOL_MULTIPLE] = 0.0
+
+    invalid = value.isna()
+    long_state.loc[invalid] = 0.0
+    short_state.loc[invalid] = 0.0
+    return long_state.ffill().fillna(0.0) + short_state.ffill().fillna(0.0)
+
+
 def sleeve_feature_names(cfg: SleeveConfig) -> tuple[str, ...]:
     return tuple(dict.fromkeys((cfg.feature, *cfg.auxiliary_features)))
 
@@ -333,6 +364,8 @@ def signal_from_features(features: pd.DataFrame, cfg: SleeveConfig) -> pd.Series
         return chemical_inflection_signal(features[cfg.feature]) * float(cfg.side_mult)
     if cfg.signal_rule == "shipping_sticky":
         return shipping_sticky_signal(features[cfg.feature], features[SHIPPING_MOMENTUM_FEATURE])
+    if cfg.signal_rule == "service_volatility_hysteresis":
+        return service_volatility_hysteresis_signal(features[cfg.feature], cfg)
     raise ValueError(f"Unknown signal rule: {cfg.signal_rule}")
 
 
