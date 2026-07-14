@@ -23,6 +23,21 @@ from comm_ls.cross_product_summary import (
 from comm_ls.curve_diagnostics import build_matrix_curve_diagnostics_from_paths
 from comm_ls.equity import download_yfinance_prices
 from comm_ls.edgar import build_filing_index, download_filings, fetch_company_tickers, extract_form_sections
+from comm_ls.eia_catalog import (
+    DEFAULT_EIA_API_BASE_URL,
+    DEFAULT_EIA_CATALOG_ROOTS,
+    catalog_eia_routes_from_api,
+    fetch_eia_shortlist_facets_from_api,
+)
+from comm_ls.eia_release_validation import audit_eia_release_readiness
+from comm_ls.eia_series_selection import build_eia_series_candidates
+from comm_ls.eia_series_shortlist import build_eia_series_shortlist
+from comm_ls.eia_wpsr_archive import DEFAULT_WPSR_PILOT_RELEASE_DATES, run_wpsr_archive_pilot
+from comm_ls.eia_wpsr_crosswalk import (
+    DEFAULT_EIA_API_BASE_URL as DEFAULT_EIA_CROSSWALK_API_BASE_URL,
+    DEFAULT_WPSR_CROSSWALK_RELEASE_DATE,
+    run_wpsr_crosswalk_validation,
+)
 from comm_ls.environment import commodity_environment_similarity_from_paths
 from comm_ls.discovery import (
     audit_commodity_universe_from_paths,
@@ -1061,6 +1076,269 @@ def build_parser() -> argparse.ArgumentParser:
     commodity_confirmation.add_argument("--eia-tradable-lag-days", type=int, default=1)
     commodity_confirmation.add_argument("--cftc-tradable-lag-days", type=int, default=3)
 
+    eia_catalog = subparsers.add_parser(
+        "catalog-eia-routes",
+        help="Build a metadata-only EIA API v2 route catalog without downloading observations.",
+    )
+    eia_catalog.add_argument(
+        "--root",
+        action="append",
+        default=None,
+        help="EIA v2 route root to crawl; repeat for multiple roots.",
+    )
+    eia_catalog.add_argument(
+        "--api-key",
+        default=None,
+        help="EIA API key. Prefer setting the environment variable named by --api-key-env.",
+    )
+    eia_catalog.add_argument("--api-key-env", default="EIA_API_KEY")
+    eia_catalog.add_argument("--base-url", default=DEFAULT_EIA_API_BASE_URL)
+    eia_catalog.add_argument("--output-dir", type=Path, default=Path("data/external/eia/catalog"))
+    eia_catalog.add_argument(
+        "--bronze-dir",
+        type=Path,
+        default=Path("data/external/eia/bronze/catalog"),
+    )
+    eia_catalog.add_argument(
+        "--cache-dir",
+        type=Path,
+        default=Path("data/external/eia/request_cache"),
+    )
+    eia_catalog.add_argument(
+        "--manifest-dir",
+        type=Path,
+        default=Path("data/external/eia/manifests"),
+    )
+    eia_catalog.add_argument("--timeout-seconds", type=float, default=30.0)
+    eia_catalog.add_argument("--max-retries", type=int, default=4)
+    eia_catalog.add_argument("--request-delay-seconds", type=float, default=0.25)
+    eia_catalog.add_argument("--refresh-cache", action="store_true")
+    eia_catalog.add_argument("--max-routes", type=int, default=None)
+    eia_catalog.add_argument("--max-depth", type=int, default=None)
+
+    eia_facets = subparsers.add_parser(
+        "fetch-eia-shortlist-facets",
+        help="Fetch facet values only for manually approved EIA shortlist routes.",
+    )
+    eia_facets.add_argument(
+        "--shortlist",
+        type=Path,
+        default=Path("config/eia_route_shortlist.csv"),
+    )
+    eia_facets.add_argument(
+        "--facets",
+        type=Path,
+        default=Path("data/external/eia/catalog/facets.csv"),
+    )
+    eia_facets.add_argument("--output-dir", type=Path, default=Path("data/external/eia/catalog"))
+    eia_facets.add_argument(
+        "--api-key",
+        default=None,
+        help="EIA API key. Prefer setting the environment variable named by --api-key-env.",
+    )
+    eia_facets.add_argument("--api-key-env", default="EIA_API_KEY")
+    eia_facets.add_argument("--base-url", default=DEFAULT_EIA_API_BASE_URL)
+    eia_facets.add_argument(
+        "--bronze-dir",
+        type=Path,
+        default=Path("data/external/eia/bronze/facets"),
+    )
+    eia_facets.add_argument(
+        "--cache-dir",
+        type=Path,
+        default=Path("data/external/eia/request_cache"),
+    )
+    eia_facets.add_argument(
+        "--manifest-dir",
+        type=Path,
+        default=Path("data/external/eia/manifests"),
+    )
+    eia_facets.add_argument("--max-priority", type=int, default=None)
+    eia_facets.add_argument(
+        "--release-product",
+        action="append",
+        default=None,
+        help="Limit discovery to a release product such as WPSR or PSM; repeat as needed.",
+    )
+    eia_facets.add_argument(
+        "--route",
+        action="append",
+        default=None,
+        help="Limit discovery to an exact shortlisted route; repeat as needed.",
+    )
+    eia_facets.add_argument("--timeout-seconds", type=float, default=30.0)
+    eia_facets.add_argument("--max-retries", type=int, default=4)
+    eia_facets.add_argument("--request-delay-seconds", type=float, default=0.25)
+    eia_facets.add_argument("--refresh-cache", action="store_true")
+    eia_facets.add_argument("--progress-every", type=int, default=10)
+
+    eia_series_candidates = subparsers.add_parser(
+        "build-eia-series-candidates",
+        help="Build a local manual-review queue from shortlisted EIA facet metadata.",
+    )
+    eia_series_candidates.add_argument(
+        "--shortlist",
+        type=Path,
+        default=Path("config/eia_route_shortlist.csv"),
+    )
+    eia_series_candidates.add_argument(
+        "--facet-values",
+        type=Path,
+        default=Path("data/external/eia/catalog/facet_values.csv"),
+    )
+    eia_series_candidates.add_argument(
+        "--output",
+        type=Path,
+        default=Path("data/external/eia/catalog/series_candidates.csv"),
+    )
+    eia_series_candidates.add_argument(
+        "--audit-output",
+        type=Path,
+        default=Path("data/external/eia/catalog/series_candidate_audit.csv"),
+    )
+    eia_series_candidates.add_argument(
+        "--manifest-dir",
+        type=Path,
+        default=Path("data/external/eia/manifests"),
+    )
+    eia_series_candidates.add_argument("--max-series-per-route", type=int, default=20)
+
+    eia_series_shortlist = subparsers.add_parser(
+        "build-eia-series-shortlist",
+        help="Apply the reviewed EIA state/unit policy without authorizing observation downloads.",
+    )
+    eia_series_shortlist.add_argument(
+        "--candidates",
+        type=Path,
+        default=Path("data/external/eia/catalog/series_candidates.csv"),
+    )
+    eia_series_shortlist.add_argument(
+        "--output",
+        type=Path,
+        default=Path("config/eia_series_shortlist.csv"),
+    )
+    eia_series_shortlist.add_argument(
+        "--audit-output",
+        type=Path,
+        default=Path("data/external/eia/catalog/series_shortlist_audit.csv"),
+    )
+    eia_series_shortlist.add_argument(
+        "--manifest-dir",
+        type=Path,
+        default=Path("data/external/eia/manifests"),
+    )
+
+    eia_release_audit = subparsers.add_parser(
+        "audit-eia-release-readiness",
+        help="Validate EIA release timing and vintage gates without downloading observations.",
+    )
+    eia_release_audit.add_argument(
+        "--release-calendar",
+        type=Path,
+        default=Path("config/eia_release_calendar.csv"),
+    )
+    eia_release_audit.add_argument(
+        "--series-shortlist",
+        type=Path,
+        default=Path("config/eia_series_shortlist.csv"),
+    )
+    eia_release_audit.add_argument(
+        "--output",
+        type=Path,
+        default=Path("data/external/eia/catalog/release_readiness_audit.csv"),
+    )
+    eia_release_audit.add_argument(
+        "--manifest-dir",
+        type=Path,
+        default=Path("data/external/eia/manifests"),
+    )
+
+    wpsr_archive_pilot = subparsers.add_parser(
+        "test-eia-wpsr-archive",
+        help="Test a bounded set of WPSR release archives without authorizing a backfill.",
+    )
+    wpsr_archive_pilot.add_argument(
+        "--release-date",
+        action="append",
+        default=None,
+        help="Explicit WPSR release date in YYYY-MM-DD; repeat 2 to 5 times.",
+    )
+    wpsr_archive_pilot.add_argument(
+        "--output-dir",
+        type=Path,
+        default=Path("data/external/eia/archive_pilot"),
+    )
+    wpsr_archive_pilot.add_argument(
+        "--bronze-dir",
+        type=Path,
+        default=Path("data/external/eia/bronze/wpsr_archive"),
+    )
+    wpsr_archive_pilot.add_argument(
+        "--cache-dir",
+        type=Path,
+        default=Path("data/external/eia/request_cache"),
+    )
+    wpsr_archive_pilot.add_argument(
+        "--manifest-dir",
+        type=Path,
+        default=Path("data/external/eia/manifests"),
+    )
+    wpsr_archive_pilot.add_argument("--timeout-seconds", type=float, default=30.0)
+    wpsr_archive_pilot.add_argument("--max-retries", type=int, default=3)
+    wpsr_archive_pilot.add_argument("--refresh-cache", action="store_true")
+
+    wpsr_crosswalk = subparsers.add_parser(
+        "validate-eia-wpsr-crosswalk",
+        help="Rank bounded WPSR API-series to archived-row mappings without approving them.",
+    )
+    wpsr_crosswalk.add_argument(
+        "--release-date",
+        default=DEFAULT_WPSR_CROSSWALK_RELEASE_DATE,
+    )
+    wpsr_crosswalk.add_argument(
+        "--series-shortlist",
+        type=Path,
+        default=Path("config/eia_series_shortlist.csv"),
+    )
+    wpsr_crosswalk.add_argument(
+        "--archive-releases",
+        type=Path,
+        default=Path("data/external/eia/archive_pilot/wpsr_archive_pilot_releases.csv"),
+    )
+    wpsr_crosswalk.add_argument(
+        "--archive-values",
+        type=Path,
+        default=Path("data/external/eia/archive_pilot/wpsr_archive_pilot_values.csv"),
+    )
+    wpsr_crosswalk.add_argument(
+        "--output-dir",
+        type=Path,
+        default=Path("data/external/eia/archive_pilot"),
+    )
+    wpsr_crosswalk.add_argument("--api-key", default=None)
+    wpsr_crosswalk.add_argument("--api-key-env", default="EIA_API_KEY")
+    wpsr_crosswalk.add_argument("--base-url", default=DEFAULT_EIA_CROSSWALK_API_BASE_URL)
+    wpsr_crosswalk.add_argument(
+        "--bronze-dir",
+        type=Path,
+        default=Path("data/external/eia/bronze/wpsr_crosswalk"),
+    )
+    wpsr_crosswalk.add_argument(
+        "--cache-dir",
+        type=Path,
+        default=Path("data/external/eia/request_cache"),
+    )
+    wpsr_crosswalk.add_argument(
+        "--manifest-dir",
+        type=Path,
+        default=Path("data/external/eia/manifests"),
+    )
+    wpsr_crosswalk.add_argument("--timeout-seconds", type=float, default=30.0)
+    wpsr_crosswalk.add_argument("--max-retries", type=int, default=3)
+    wpsr_crosswalk.add_argument("--request-delay-seconds", type=float, default=0.25)
+    wpsr_crosswalk.add_argument("--refresh-cache", action="store_true")
+    wpsr_crosswalk.add_argument("--top-n", type=int, default=5)
+
     commodity_research = subparsers.add_parser("research-commodity-features")
     commodity_research.add_argument("--commodity", required=True)
     commodity_research.add_argument("--matrix-dir", type=Path, default=None)
@@ -1183,6 +1461,174 @@ def build_parser() -> argparse.ArgumentParser:
 def main() -> None:
     parser = build_parser()
     args = parser.parse_args()
+
+    if args.command == "catalog-eia-routes":
+        roots = args.root or list(DEFAULT_EIA_CATALOG_ROOTS)
+        summary = catalog_eia_routes_from_api(
+            roots=roots,
+            api_key=args.api_key,
+            api_key_env=args.api_key_env,
+            base_url=args.base_url,
+            output_dir=args.output_dir,
+            bronze_dir=args.bronze_dir,
+            cache_dir=args.cache_dir,
+            manifest_dir=args.manifest_dir,
+            timeout_seconds=args.timeout_seconds,
+            max_retries=args.max_retries,
+            request_delay_seconds=args.request_delay_seconds,
+            refresh_cache=args.refresh_cache,
+            max_routes=args.max_routes,
+            max_depth=args.max_depth,
+        )
+        print(
+            f"Wrote EIA metadata catalog to {args.output_dir}: "
+            f"routes={summary['route_count']:,}, leaves={summary['leaf_count']:,}, "
+            f"measures={summary['measure_count']:,}, facets={summary['facet_count']:,}, "
+            f"requests={summary['request_count']:,}, cache_hits={summary['cache_hit_count']:,}, "
+            f"truncated={summary['truncated']}"
+        )
+        return
+
+    if args.command == "fetch-eia-shortlist-facets":
+        summary = fetch_eia_shortlist_facets_from_api(
+            shortlist_path=args.shortlist,
+            facets_path=args.facets,
+            output_dir=args.output_dir,
+            api_key=args.api_key,
+            api_key_env=args.api_key_env,
+            base_url=args.base_url,
+            bronze_dir=args.bronze_dir,
+            cache_dir=args.cache_dir,
+            manifest_dir=args.manifest_dir,
+            max_priority=args.max_priority,
+            release_products=tuple(args.release_product) if args.release_product else None,
+            selected_routes=tuple(args.route) if args.route else None,
+            timeout_seconds=args.timeout_seconds,
+            max_retries=args.max_retries,
+            request_delay_seconds=args.request_delay_seconds,
+            refresh_cache=args.refresh_cache,
+            progress_every=args.progress_every,
+            progress=print,
+        )
+        print(
+            f"Wrote shortlisted EIA facet catalog to {args.output_dir}: "
+            f"routes={summary['shortlist_route_count']:,}, facets={summary['facet_count']:,}, "
+            f"current_values={summary['current_facet_value_count']:,}, "
+            f"requests={summary['request_count']:,}, cache_hits={summary['cache_hit_count']:,}"
+        )
+        return
+
+    if args.command == "build-eia-series-candidates":
+        summary = build_eia_series_candidates(
+            shortlist_path=args.shortlist,
+            facet_values_path=args.facet_values,
+            output_path=args.output,
+            audit_output_path=args.audit_output,
+            manifest_dir=args.manifest_dir,
+            max_series_per_route=args.max_series_per_route,
+        )
+        print(
+            f"Wrote EIA manual-review queue to {args.output}: "
+            f"routes={summary['route_count']:,}, candidates={summary['candidate_count']:,}, "
+            f"series={summary['series_candidate_count']:,}, "
+            f"dataset_scopes={summary['dataset_scope_count']:,}, "
+            f"approved_for_backfill={summary['approved_for_backfill_count']:,}"
+        )
+        return
+
+    if args.command == "build-eia-series-shortlist":
+        summary = build_eia_series_shortlist(
+            candidates_path=args.candidates,
+            output_path=args.output,
+            audit_output_path=args.audit_output,
+            manifest_dir=args.manifest_dir,
+        )
+        print(
+            f"Wrote EIA series review to {args.output}: rows={summary['row_count']:,}, "
+            f"keep={summary['keep_count']:,}, defer={summary['defer_count']:,}, "
+            f"reject={summary['reject_count']:,}, "
+            f"initial_core={summary['proposed_initial_core_count']:,}, "
+            f"approved_for_backfill={summary['approved_for_backfill_count']:,}"
+        )
+        return
+
+    if args.command == "audit-eia-release-readiness":
+        summary = audit_eia_release_readiness(
+            release_calendar_path=args.release_calendar,
+            series_shortlist_path=args.series_shortlist,
+            output_path=args.output,
+            manifest_dir=args.manifest_dir,
+        )
+        print(
+            f"Wrote EIA release-readiness audit to {args.output}: "
+            f"products={summary['release_product_count']:,}, "
+            f"series={summary['shortlist_row_count']:,}, "
+            f"initial_core={summary['initial_core_row_count']:,}, "
+            f"approved_for_backfill={summary['approved_for_backfill_count']:,}, "
+            f"errors={summary['error_count']:,}"
+        )
+        if summary["error_count"]:
+            raise SystemExit(1)
+        return
+
+    if args.command == "test-eia-wpsr-archive":
+        summary = run_wpsr_archive_pilot(
+            release_dates=(
+                tuple(args.release_date) if args.release_date else DEFAULT_WPSR_PILOT_RELEASE_DATES
+            ),
+            output_dir=args.output_dir,
+            bronze_dir=args.bronze_dir,
+            cache_dir=args.cache_dir,
+            manifest_dir=args.manifest_dir,
+            timeout_seconds=args.timeout_seconds,
+            max_retries=args.max_retries,
+            refresh_cache=args.refresh_cache,
+        )
+        print(
+            f"Wrote WPSR archive pilot to {args.output_dir}: "
+            f"releases={summary['successful_release_count']:,}/{summary['release_count']:,}, "
+            f"comparisons={summary['comparison_count']:,}, "
+            f"revisions={summary['revision_count']:,}, "
+            f"schema_changes={summary['schema_change_count']:,}, "
+            f"requests={summary['network_requests']:,}, "
+            f"backfill_authorized={summary['observation_backfill_authorized']}"
+        )
+        if summary["release_error_count"] or summary["comparison_error_count"]:
+            raise SystemExit(1)
+        return
+
+    if args.command == "validate-eia-wpsr-crosswalk":
+        summary = run_wpsr_crosswalk_validation(
+            release_date=args.release_date,
+            shortlist_path=args.series_shortlist,
+            archive_releases_path=args.archive_releases,
+            archive_values_path=args.archive_values,
+            output_dir=args.output_dir,
+            api_key=args.api_key,
+            api_key_env=args.api_key_env,
+            base_url=args.base_url,
+            bronze_dir=args.bronze_dir,
+            cache_dir=args.cache_dir,
+            manifest_dir=args.manifest_dir,
+            timeout_seconds=args.timeout_seconds,
+            max_retries=args.max_retries,
+            request_delay_seconds=args.request_delay_seconds,
+            refresh_cache=args.refresh_cache,
+            top_n=args.top_n,
+        )
+        print(
+            f"Wrote WPSR crosswalk validation to {args.output_dir}: "
+            f"series={summary['api_observation_count']:,}/{summary['initial_core_count']:,}, "
+            f"routes={summary['route_count']:,}, "
+            f"unresolved={summary['unresolved_count']:,}, "
+            f"ambiguous={summary['ambiguous_count']:,}, "
+            f"requests={summary['network_requests']:,}, "
+            f"approved={summary['approved_crosswalk_count']:,}, "
+            f"backfill_authorized={summary['observation_backfill_authorized']}"
+        )
+        if summary["request_error_count"] or summary["api_missing_count"]:
+            raise SystemExit(1)
+        return
 
     if args.command == "build-commodity-signals":
         print(f"Loading carry data from {args.input_dir} ...")
