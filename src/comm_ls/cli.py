@@ -33,11 +33,16 @@ from comm_ls.eia_release_validation import audit_eia_release_readiness
 from comm_ls.eia_series_selection import build_eia_series_candidates
 from comm_ls.eia_series_shortlist import build_eia_series_shortlist
 from comm_ls.eia_wpsr_archive import DEFAULT_WPSR_PILOT_RELEASE_DATES, run_wpsr_archive_pilot
+from comm_ls.eia_wpsr_incremental import update_wpsr_archive_incrementally
+from comm_ls.eia_wpsr_evidence import validate_wpsr_crosswalk_evidence
 from comm_ls.eia_wpsr_crosswalk import (
     DEFAULT_EIA_API_BASE_URL as DEFAULT_EIA_CROSSWALK_API_BASE_URL,
     DEFAULT_WPSR_CROSSWALK_RELEASE_DATE,
     run_wpsr_crosswalk_validation,
 )
+from comm_ls.eia_wpsr_review import approve_wpsr_crosswalk, build_wpsr_crosswalk_review
+from comm_ls.eia_wpsr_release_index import discover_wpsr_release_dates
+from comm_ls.eia_wpsr_states import build_wpsr_gold_states, build_wpsr_silver
 from comm_ls.environment import commodity_environment_similarity_from_paths
 from comm_ls.discovery import (
     audit_commodity_universe_from_paths,
@@ -114,7 +119,21 @@ from comm_ls.universe import (
 )
 
 
-DEFAULT_EXCLUDED_BROAD_UNIVERSE_TICKERS = ["SPY", "XLE", "XME", "GDX", "SIL", "XLU", "MOO", "LIT", "URA", "XHB"]
+DEFAULT_EXCLUDED_BROAD_UNIVERSE_TICKERS = [
+    "SPY",
+    "XLE",
+    "XME",
+    "GDX",
+    "SIL",
+    "XLU",
+    "MOO",
+    "LIT",
+    "URA",
+    "XHB",
+    "CRAK",
+]
+
+DEFAULT_LIVE_HEDGE_TICKERS = ["SPY", "XLE", "XME"]
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -138,6 +157,11 @@ def build_parser() -> argparse.ArgumentParser:
     download.add_argument("--end", default=None)
     download.add_argument("--ticker", action="append", default=None)
     download.add_argument("--limit", type=int, default=None)
+    download.add_argument(
+        "--no-default-hedges",
+        action="store_true",
+        help="Do not append the production hedge tickers SPY, XLE, and XME to a full-universe download.",
+    )
     download.add_argument(
         "--auto-adjust",
         action="store_true",
@@ -1339,6 +1363,218 @@ def build_parser() -> argparse.ArgumentParser:
     wpsr_crosswalk.add_argument("--refresh-cache", action="store_true")
     wpsr_crosswalk.add_argument("--top-n", type=int, default=5)
 
+    wpsr_review = subparsers.add_parser(
+        "build-eia-wpsr-crosswalk-review",
+        help="Build a stable human-review file from WPSR crosswalk candidates.",
+    )
+    wpsr_review.add_argument(
+        "--audit",
+        type=Path,
+        default=Path("data/external/eia/archive_pilot/wpsr_crosswalk_audit.csv"),
+    )
+    wpsr_review.add_argument(
+        "--candidates",
+        type=Path,
+        default=Path("data/external/eia/archive_pilot/wpsr_crosswalk_candidates.csv"),
+    )
+    wpsr_review.add_argument(
+        "--evidence-audit",
+        type=Path,
+        default=Path(
+            "data/external/eia/wpsr_crosswalk_evidence/"
+            "wpsr_crosswalk_multi_release_audit.csv"
+        ),
+    )
+    wpsr_review.add_argument(
+        "--output",
+        type=Path,
+        default=Path("config/eia_wpsr_crosswalk_review.csv"),
+    )
+
+    wpsr_approve = subparsers.add_parser(
+        "approve-eia-wpsr-crosswalk",
+        help="Build the canonical WPSR crosswalk from explicitly reviewed rows.",
+    )
+    wpsr_approve.add_argument(
+        "--review",
+        type=Path,
+        default=Path("config/eia_wpsr_crosswalk_review.csv"),
+    )
+    wpsr_approve.add_argument(
+        "--candidates",
+        type=Path,
+        default=Path("data/external/eia/archive_pilot/wpsr_crosswalk_candidates.csv"),
+    )
+    wpsr_approve.add_argument(
+        "--output",
+        type=Path,
+        default=Path("config/eia_wpsr_crosswalk.csv"),
+    )
+    wpsr_approve.add_argument(
+        "--audit-output",
+        type=Path,
+        default=Path("data/external/eia/catalog/wpsr_crosswalk_approval_audit.csv"),
+    )
+
+    wpsr_release_dates = subparsers.add_parser(
+        "discover-eia-wpsr-release-dates",
+        help="Discover the official WPSR archive release-date queue.",
+    )
+    wpsr_release_dates.add_argument(
+        "--output",
+        type=Path,
+        default=Path("config/eia_wpsr_release_dates.csv"),
+    )
+    wpsr_release_dates.add_argument(
+        "--bronze-dir",
+        type=Path,
+        default=Path("data/external/eia/bronze/wpsr_release_index"),
+    )
+    wpsr_release_dates.add_argument(
+        "--cache-dir", type=Path, default=Path("data/external/eia/request_cache")
+    )
+    wpsr_release_dates.add_argument("--start")
+    wpsr_release_dates.add_argument("--end")
+    wpsr_release_dates.add_argument("--timeout-seconds", type=float, default=30.0)
+    wpsr_release_dates.add_argument("--max-retries", type=int, default=3)
+    wpsr_release_dates.add_argument("--refresh-cache", action="store_true")
+
+    wpsr_incremental = subparsers.add_parser(
+        "update-eia-wpsr-archive",
+        help="Incrementally fetch explicit reviewed WPSR release dates with cache and resume support.",
+    )
+    wpsr_incremental.add_argument(
+        "--release-dates",
+        type=Path,
+        default=Path("config/eia_wpsr_release_dates.csv"),
+    )
+    wpsr_incremental.add_argument(
+        "--output-dir", type=Path, default=Path("data/external/eia/wpsr_archive")
+    )
+    wpsr_incremental.add_argument(
+        "--bronze-dir",
+        type=Path,
+        default=Path("data/external/eia/bronze/wpsr_archive"),
+    )
+    wpsr_incremental.add_argument(
+        "--cache-dir", type=Path, default=Path("data/external/eia/request_cache")
+    )
+    wpsr_incremental.add_argument(
+        "--manifest-dir", type=Path, default=Path("data/external/eia/manifests")
+    )
+    wpsr_incremental.add_argument("--timeout-seconds", type=float, default=30.0)
+    wpsr_incremental.add_argument("--max-retries", type=int, default=3)
+    wpsr_incremental.add_argument("--request-delay-seconds", type=float, default=0.2)
+    wpsr_incremental.add_argument("--progress-every-batches", type=int, default=1)
+    wpsr_incremental.add_argument("--refresh-cache", action="store_true")
+
+    wpsr_silver = subparsers.add_parser(
+        "build-eia-wpsr-silver",
+        help="Build point-in-time WPSR Silver vintages from approved archive crosswalks.",
+    )
+    wpsr_silver.add_argument(
+        "--crosswalk", type=Path, default=Path("config/eia_wpsr_crosswalk.csv")
+    )
+    wpsr_silver.add_argument(
+        "--archive-releases",
+        type=Path,
+        default=Path("data/external/eia/wpsr_archive/wpsr_archive_releases.csv"),
+    )
+    wpsr_silver.add_argument(
+        "--archive-values",
+        type=Path,
+        default=Path("data/external/eia/wpsr_archive/wpsr_archive_values.csv"),
+    )
+    wpsr_silver.add_argument(
+        "--release-dates",
+        type=Path,
+        default=Path("config/eia_wpsr_release_dates.csv"),
+    )
+    wpsr_silver.add_argument(
+        "--session-dates",
+        type=Path,
+        default=Path("data/processed/equity_processed.parquet"),
+    )
+    wpsr_silver.add_argument(
+        "--vintage-output",
+        type=Path,
+        default=Path("data/processed/eia/observations_vintage.csv"),
+    )
+    wpsr_silver.add_argument(
+        "--latest-output",
+        type=Path,
+        default=Path("data/processed/eia/observations_latest.csv"),
+    )
+
+    wpsr_gold = subparsers.add_parser(
+        "build-eia-wpsr-states",
+        help="Build unsigned physical WPSR states without changing curve signals or targets.",
+    )
+    wpsr_gold.add_argument(
+        "--latest",
+        type=Path,
+        default=Path("data/processed/eia/observations_latest.csv"),
+    )
+    wpsr_gold.add_argument(
+        "--feature-registry",
+        type=Path,
+        default=Path("config/eia_feature_registry.csv"),
+    )
+    wpsr_gold.add_argument(
+        "--output",
+        type=Path,
+        default=Path("data/processed/eia/feature_states/wpsr_physical_states.csv"),
+    )
+    wpsr_gold.add_argument("--min-seasonal-observations", type=int, default=3)
+
+    wpsr_evidence = subparsers.add_parser(
+        "validate-eia-wpsr-crosswalk-evidence",
+        help="Aggregate manual-review WPSR crosswalk evidence across multiple releases.",
+    )
+    wpsr_evidence.add_argument(
+        "--release-date",
+        action="append",
+        required=True,
+        help="Archived WPSR release date; repeat at least twice.",
+    )
+    wpsr_evidence.add_argument(
+        "--series-shortlist", type=Path, default=Path("config/eia_series_shortlist.csv")
+    )
+    wpsr_evidence.add_argument(
+        "--archive-releases",
+        type=Path,
+        default=Path("data/external/eia/wpsr_archive/wpsr_archive_releases.csv"),
+    )
+    wpsr_evidence.add_argument(
+        "--archive-values",
+        type=Path,
+        default=Path("data/external/eia/wpsr_archive/wpsr_archive_values.csv"),
+    )
+    wpsr_evidence.add_argument(
+        "--output-dir",
+        type=Path,
+        default=Path("data/external/eia/wpsr_crosswalk_evidence"),
+    )
+    wpsr_evidence.add_argument("--api-key", default=None)
+    wpsr_evidence.add_argument("--api-key-env", default="EIA_API_KEY")
+    wpsr_evidence.add_argument("--base-url", default=DEFAULT_EIA_CROSSWALK_API_BASE_URL)
+    wpsr_evidence.add_argument(
+        "--bronze-dir",
+        type=Path,
+        default=Path("data/external/eia/bronze/wpsr_crosswalk"),
+    )
+    wpsr_evidence.add_argument(
+        "--cache-dir", type=Path, default=Path("data/external/eia/request_cache")
+    )
+    wpsr_evidence.add_argument(
+        "--manifest-dir", type=Path, default=Path("data/external/eia/manifests")
+    )
+    wpsr_evidence.add_argument("--timeout-seconds", type=float, default=30.0)
+    wpsr_evidence.add_argument("--max-retries", type=int, default=3)
+    wpsr_evidence.add_argument("--request-delay-seconds", type=float, default=0.25)
+    wpsr_evidence.add_argument("--refresh-cache", action="store_true")
+    wpsr_evidence.add_argument("--top-n", type=int, default=5)
+
     commodity_research = subparsers.add_parser("research-commodity-features")
     commodity_research.add_argument("--commodity", required=True)
     commodity_research.add_argument("--matrix-dir", type=Path, default=None)
@@ -1630,6 +1866,142 @@ def main() -> None:
             raise SystemExit(1)
         return
 
+    if args.command == "build-eia-wpsr-crosswalk-review":
+        summary = build_wpsr_crosswalk_review(
+            audit_path=args.audit,
+            candidates_path=args.candidates,
+            evidence_audit_path=args.evidence_audit,
+            output_path=args.output,
+        )
+        print(
+            f"Wrote WPSR crosswalk review to {args.output}: "
+            f"rows={summary['row_count']:,}, high_confidence={summary['high_confidence_count']:,}, "
+            f"manual_decisions={summary['manual_decision_count']:,}"
+        )
+        return
+
+    if args.command == "approve-eia-wpsr-crosswalk":
+        summary = approve_wpsr_crosswalk(
+            review_path=args.review,
+            candidates_path=args.candidates,
+            output_path=args.output,
+            audit_output_path=args.audit_output,
+        )
+        print(
+            f"Wrote canonical WPSR crosswalk to {args.output}: "
+            f"approved={summary['approved_count']:,}, rejected={summary['rejected_count']:,}, "
+            f"deferred={summary['deferred_count']:,}, errors={summary['error_count']:,}"
+        )
+        if summary["error_count"]:
+            raise SystemExit(1)
+        return
+
+    if args.command == "discover-eia-wpsr-release-dates":
+        summary = discover_wpsr_release_dates(
+            output_path=args.output,
+            bronze_dir=args.bronze_dir,
+            cache_dir=args.cache_dir,
+            start=args.start,
+            end=args.end,
+            timeout_seconds=args.timeout_seconds,
+            max_retries=args.max_retries,
+            refresh_cache=args.refresh_cache,
+        )
+        print(
+            f"Wrote official WPSR release queue to {args.output}: "
+            f"releases={summary['release_count']:,}, "
+            f"range={summary['start_release_date']}..{summary['end_release_date']}, "
+            f"from_cache={summary['from_cache']}"
+        )
+        return
+
+    if args.command == "update-eia-wpsr-archive":
+        summary = update_wpsr_archive_incrementally(
+            release_dates_path=args.release_dates,
+            output_dir=args.output_dir,
+            bronze_dir=args.bronze_dir,
+            cache_dir=args.cache_dir,
+            manifest_dir=args.manifest_dir,
+            timeout_seconds=args.timeout_seconds,
+            max_retries=args.max_retries,
+            request_delay_seconds=args.request_delay_seconds,
+            progress_every_batches=args.progress_every_batches,
+            refresh_cache=args.refresh_cache,
+            progress=print,
+        )
+        print(
+            f"Updated WPSR archive in {args.output_dir}: "
+            f"pending={summary['pending_release_count']:,}, "
+            f"successful={summary['successful_release_count']:,}, "
+            f"errors={summary['release_error_count']:,}, "
+            f"values={summary['value_row_count']:,}, requests={summary['network_requests']:,}"
+        )
+        if summary["release_error_count"]:
+            raise SystemExit(1)
+        return
+
+    if args.command == "build-eia-wpsr-silver":
+        summary = build_wpsr_silver(
+            crosswalk_path=args.crosswalk,
+            archive_releases_path=args.archive_releases,
+            archive_values_path=args.archive_values,
+            release_dates_path=args.release_dates,
+            session_dates_path=args.session_dates,
+            vintage_output_path=args.vintage_output,
+            latest_output_path=args.latest_output,
+        )
+        print(
+            f"Wrote WPSR Silver: vintages={summary['vintage_row_count']:,}, "
+            f"latest={summary['latest_row_count']:,}, "
+            f"missing_tradable_after={summary['missing_tradable_after_count']:,}"
+        )
+        if summary["duplicate_count"] or summary["missing_tradable_after_count"]:
+            raise SystemExit(1)
+        return
+
+    if args.command == "build-eia-wpsr-states":
+        summary = build_wpsr_gold_states(
+            latest_path=args.latest,
+            feature_registry_path=args.feature_registry,
+            output_path=args.output,
+            min_seasonal_observations=args.min_seasonal_observations,
+        )
+        print(
+            f"Wrote WPSR physical states to {args.output}: "
+            f"rows={summary['output_row_count']:,}, "
+            f"seasonal_z={summary.get('seasonal_z_available_count', 0):,}"
+        )
+        return
+
+    if args.command == "validate-eia-wpsr-crosswalk-evidence":
+        summary = validate_wpsr_crosswalk_evidence(
+            release_dates=tuple(args.release_date),
+            shortlist_path=args.series_shortlist,
+            archive_releases_path=args.archive_releases,
+            archive_values_path=args.archive_values,
+            output_dir=args.output_dir,
+            api_key=args.api_key,
+            api_key_env=args.api_key_env,
+            base_url=args.base_url,
+            bronze_dir=args.bronze_dir,
+            cache_dir=args.cache_dir,
+            manifest_dir=args.manifest_dir,
+            timeout_seconds=args.timeout_seconds,
+            max_retries=args.max_retries,
+            request_delay_seconds=args.request_delay_seconds,
+            refresh_cache=args.refresh_cache,
+            top_n=args.top_n,
+        )
+        print(
+            f"Wrote multi-release WPSR evidence to {args.output_dir}: "
+            f"releases={summary['release_count']:,}, series={summary['series_count']:,}, "
+            f"strong_candidates={summary['strong_candidate_count']:,}, "
+            f"errors={summary['error_count']:,}, requests={summary['network_requests']:,}"
+        )
+        if summary["error_count"]:
+            raise SystemExit(1)
+        return
+
     if args.command == "build-commodity-signals":
         print(f"Loading carry data from {args.input_dir} ...")
         carry = load_carry_directory(args.input_dir)
@@ -1674,10 +2046,22 @@ def main() -> None:
         seed = load_seed_universe(args.universe)
         if args.ticker:
             tickers = [ticker.upper() for ticker in args.ticker]
+            if args.limit is not None:
+                tickers = tickers[: args.limit]
         else:
             tickers = seed["ticker"].tolist()
-        if args.limit is not None:
-            tickers = tickers[: args.limit]
+            if args.limit is not None:
+                tickers = tickers[: args.limit]
+            if not args.no_default_hedges:
+                existing = set(tickers)
+                appended_hedges = [ticker for ticker in DEFAULT_LIVE_HEDGE_TICKERS if ticker not in existing]
+                tickers.extend(appended_hedges)
+                print(
+                    "[download-equities] production hedges ensured: "
+                    + ", ".join(DEFAULT_LIVE_HEDGE_TICKERS)
+                    + (f" (appended: {', '.join(appended_hedges)})" if appended_hedges else " (already present)"),
+                    flush=True,
+                )
         paths = download_yfinance_prices(
             tickers,
             output_dir=args.output_dir,

@@ -11,6 +11,8 @@ from comm_ls.universe import load_seed_universe
 
 
 def feature_family(feature: str) -> str:
+    if "ratio_ma_gap" in feature:
+        return "relative_price_momentum"
     if feature.startswith(("price_volume", "price_oi", "volume", "oi")):
         return "participation"
     if (
@@ -56,6 +58,9 @@ def feature_hypothesis_family(feature: str) -> str:
     def _change_bucket(value: str) -> str:
         return "change" if "_chg_" in value or value.endswith("_chg") else "level"
 
+    if "ratio_ma_gap" in name:
+        construction = "chained" if name.endswith("_chained") else "raw"
+        return f"cross_commodity_ratio_momentum:hg_gc:{construction}"
     if "annualized_carry" in name or "backwardation_steepness" in name:
         return f"curve_slope:{_curve_anchor(name)}:{_change_bucket(name)}"
     if name in {"carry", "carry_chg_5d", "carry_chg_21d", "carry_pctile_252d"}:
@@ -88,6 +93,8 @@ def state_hypothesis(feature: str) -> str:
     """
     name = str(feature).removeprefix("feature_z__").strip().lower()
 
+    if "ratio_ma_gap" in name:
+        return "cross_commodity_relative_value_momentum"
     if name == "days_in_backwardation":
         return "curve_tightness_persistence"
     if name in {"backwardation_regime_change", "term_structure_regime_change"}:

@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 
-WPSR_ARCHIVE_SCHEMA_VERSION = "2"
+WPSR_ARCHIVE_SCHEMA_VERSION = "3"
 DEFAULT_WPSR_PILOT_RELEASE_DATES = ("2025-01-08", "2025-01-15", "2025-01-23")
 WPSR_ARCHIVE_BASE_URL = "https://www.eia.gov/petroleum/supply/weekly/archive"
 
@@ -34,6 +34,8 @@ RELEASE_COLUMNS = [
     "table_row_count",
     "current_observation_date",
     "previous_observation_date",
+    "metadata_quality",
+    "metadata_warning",
     "status",
     "error",
 ]
@@ -177,6 +179,44 @@ def _numeric(value: str) -> float | None:
         return float(cleaned)
     except ValueError:
         return None
+
+
+def _table_header_dates(content: bytes, release_date: str) -> tuple[str, str]:
+    decoded = content.decode("utf-8", errors="replace")
+    rows = csv.reader(io.StringIO(decoded))
+    header = next(rows, [])
+    if len(header) < 4:
+        raise ValueError("WPSR table9 CSV is missing expected header columns")
+    release_year = date.fromisoformat(release_date).year
+    return (
+        _parse_archive_date(header[2], release_year),
+        _parse_archive_date(header[3], release_year),
+    )
+
+
+def _validate_table_timing(
+    release_date: str,
+    current_observation_date: str,
+    previous_observation_date: str,
+) -> None:
+    release_day = date.fromisoformat(release_date)
+    current_day = date.fromisoformat(current_observation_date)
+    previous_day = date.fromisoformat(previous_observation_date)
+    lag_days = (release_day - current_day).days
+    if current_day.weekday() != 4:
+        raise ValueError(
+            f"WPSR current observation is not Friday: {current_observation_date}"
+        )
+    if (current_day - previous_day).days != 7:
+        raise ValueError(
+            "WPSR current/previous observations are not seven days apart: "
+            f"current={current_observation_date}, previous={previous_observation_date}"
+        )
+    if not 5 <= lag_days <= 10:
+        raise ValueError(
+            "WPSR release/table timing is implausible: "
+            f"release={release_date}, current={current_observation_date}, lag={lag_days}d"
+        )
 
 
 def parse_wpsr_table9(
@@ -413,17 +453,22 @@ def run_wpsr_archive_pilot(
     manifest_dir: Path = Path("data/external/eia/manifests"),
     timeout_seconds: float = 30.0,
     max_retries: int = 3,
+    request_delay_seconds: float = 0.0,
     refresh_cache: bool = False,
     fetcher: Callable[[str], bytes] | None = None,
 ) -> dict[str, Any]:
     normalized_dates = tuple(sorted({date.fromisoformat(value).isoformat() for value in release_dates}))
     if not 2 <= len(normalized_dates) <= 5:
         raise ValueError("WPSR archive pilot requires 2 to 5 distinct explicit release dates")
+    if request_delay_seconds < 0:
+        raise ValueError("request_delay_seconds must be non-negative")
     fetched_at = _iso_utc()
     network_requests = 0
 
     def fetch(url: str) -> bytes:
         nonlocal network_requests
+        if request_delay_seconds:
+            time.sleep(request_delay_seconds)
         network_requests += 1
         if fetcher is not None:
             return fetcher(url)
@@ -451,15 +496,36 @@ def run_wpsr_archive_pilot(
                 refresh_cache=refresh_cache,
                 fetch=fetch,
             )
-            parsed_release, week_ending = parse_wpsr_archive_page(page)
-            if parsed_release != release_date:
-                raise ValueError(
-                    f"Requested/parsed release mismatch: requested={release_date}, parsed={parsed_release}"
-                )
+            current_observation, previous_observation = _table_header_dates(
+                table, release_date
+            )
+            _validate_table_timing(
+                release_date, current_observation, previous_observation
+            )
+            metadata_quality = "page_and_table_timing_verified"
+            metadata_warning = ""
+            try:
+                parsed_release, page_week_ending = parse_wpsr_archive_page(page)
+            except ValueError as exc:
+                parsed_release = ""
+                page_week_ending = ""
+                metadata_quality = "page_metadata_missing_table_timing_verified"
+                metadata_warning = str(exc)
+            else:
+                if (
+                    parsed_release != release_date
+                    or page_week_ending != current_observation
+                ):
+                    metadata_quality = "page_metadata_anomaly_table_timing_verified"
+                    metadata_warning = (
+                        f"page_release={parsed_release}, requested_release={release_date}, "
+                        f"page_week_ending={page_week_ending}, "
+                        f"table_week_ending={current_observation}"
+                    )
             table_summary, values = parse_wpsr_table9(
                 table,
-                release_date=parsed_release,
-                week_ending_date=week_ending,
+                release_date=release_date,
+                week_ending_date=current_observation,
                 source_checksum=table_checksum,
             )
             all_values.extend(values)
@@ -469,7 +535,7 @@ def run_wpsr_archive_pilot(
                     "fetched_at": fetched_at,
                     "requested_release_date": release_date,
                     "parsed_release_date": parsed_release,
-                    "week_ending_date": week_ending,
+                    "week_ending_date": current_observation,
                     "page_url": page_url,
                     "table_url": table_url,
                     "page_checksum": page_checksum,
@@ -477,6 +543,8 @@ def run_wpsr_archive_pilot(
                     "page_from_cache": page_cached,
                     "table_from_cache": table_cached,
                     **table_summary,
+                    "metadata_quality": metadata_quality,
+                    "metadata_warning": metadata_warning,
                     "status": "ok",
                     "error": "",
                 }
@@ -498,6 +566,8 @@ def run_wpsr_archive_pilot(
                     "table_row_count": 0,
                     "current_observation_date": "",
                     "previous_observation_date": "",
+                    "metadata_quality": "failed_validation",
+                    "metadata_warning": "",
                     "status": "error",
                     "error": f"{type(exc).__name__}: {exc}",
                 }
