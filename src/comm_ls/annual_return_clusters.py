@@ -30,8 +30,13 @@ class AnnualClusterResult:
     distance: pd.DataFrame
 
 
-def load_q1_point_in_time_universe(universe_dir: Path, year: int) -> pd.DataFrame:
-    path = universe_dir / f"CL-Univ-{year}-Q1.csv"
+def load_q1_point_in_time_universe(
+    universe_dir: Path,
+    year: int,
+    commodity: str = "CL",
+) -> pd.DataFrame:
+    commodity = commodity.upper().strip()
+    path = universe_dir / f"{commodity}-Univ-{year}-Q1.csv"
     if not path.exists():
         raise FileNotFoundError(f"Missing point-in-time universe: {path}")
 
@@ -47,7 +52,9 @@ def load_q1_point_in_time_universe(universe_dir: Path, year: int) -> pd.DataFram
     expected_quarter = f"{year}-Q1"
     if not out["quarter"].astype(str).eq(expected_quarter).all():
         raise ValueError(f"{path} contains rows outside {expected_quarter}")
-    if out["asof_date"].isna().any() or out["asof_date"].max() >= pd.Timestamp(f"{year}-01-01"):
+    if out["asof_date"].isna().any() or out["asof_date"].max() >= pd.Timestamp(
+        f"{year}-01-01"
+    ):
         raise ValueError(f"{path} is not point-in-time as of the prior year end")
 
     if "is_tradeable" in out.columns:
@@ -59,17 +66,30 @@ def load_q1_point_in_time_universe(universe_dir: Path, year: int) -> pd.DataFram
     return out.drop_duplicates("ticker", keep="first").reset_index(drop=True)
 
 
-def load_cl_simple_returns(path: Path, year: int) -> pd.Series:
+def load_commodity_simple_returns(
+    path: Path,
+    year: int,
+    *,
+    name: str = "commodity_return",
+) -> pd.Series:
     frame = pd.read_csv(path, usecols=["date", "m0_ret"])
     frame["date"] = pd.to_datetime(frame["date"], errors="coerce")
     frame["m0_ret"] = pd.to_numeric(frame["m0_ret"], errors="coerce")
-    frame = frame[frame["date"].dt.year.eq(year)].dropna().drop_duplicates("date", keep="last")
+    frame = (
+        frame[frame["date"].dt.year.eq(year)]
+        .dropna()
+        .drop_duplicates("date", keep="last")
+    )
     result = pd.Series(
         np.expm1(frame["m0_ret"].to_numpy(dtype=float)),
         index=pd.DatetimeIndex(frame["date"].to_numpy()),
-        name="cl_return",
+        name=name,
     )
     return result.sort_index()
+
+
+def load_cl_simple_returns(path: Path, year: int) -> pd.Series:
+    return load_commodity_simple_returns(path, year, name="cl_return")
 
 
 def build_annual_return_panel(
@@ -87,7 +107,9 @@ def build_annual_return_panel(
     data = processed.loc[:, list(required)].copy()
     data["date"] = pd.to_datetime(data["date"], errors="coerce")
     data["ticker"] = data["ticker"].astype(str).str.upper().str.strip()
-    data[config.return_column] = pd.to_numeric(data[config.return_column], errors="coerce")
+    data[config.return_column] = pd.to_numeric(
+        data[config.return_column], errors="coerce"
+    )
     data = data[data["date"].dt.year.eq(year) & data["ticker"].isin(tickers)]
     panel = data.pivot_table(
         index="date", columns="ticker", values=config.return_column, aggfunc="last"
@@ -96,8 +118,12 @@ def build_annual_return_panel(
     observations = panel.notna().sum().reindex(tickers, fill_value=0).astype(int)
     audit = universe.copy()
     audit["year"] = year
-    audit["return_observations"] = audit["ticker"].map(observations).fillna(0).astype(int)
-    audit["included_for_cl_scoring"] = audit["return_observations"].ge(config.min_observations)
+    audit["return_observations"] = (
+        audit["ticker"].map(observations).fillna(0).astype(int)
+    )
+    audit["included_for_cl_scoring"] = audit["return_observations"].ge(
+        config.min_observations
+    )
     audit["exclusion_reason"] = np.where(
         audit["included_for_cl_scoring"], "", "insufficient_return_observations"
     )
@@ -112,39 +138,69 @@ def build_annual_return_panel(
     return panel, audit
 
 
+def score_commodity_relevance(
+    panel: pd.DataFrame,
+    commodity_returns: pd.Series,
+    min_overlap: int,
+    *,
+    label: str = "commodity",
+) -> pd.DataFrame:
+    label = label.lower().strip()
+    overlap_column = f"{label}_overlap"
+    correlation_column = f"{label}_correlation"
+    absolute_column = f"{label}_abs_correlation"
+    rows: list[dict[str, object]] = []
+    for ticker in panel.columns:
+        pair = pd.concat([panel[ticker], commodity_returns], axis=1).dropna()
+        corr = (
+            float(pair.iloc[:, 0].corr(pair.iloc[:, 1]))
+            if len(pair) >= min_overlap
+            else np.nan
+        )
+        rows.append(
+            {
+                "ticker": ticker,
+                overlap_column: int(len(pair)),
+                correlation_column: corr,
+                absolute_column: abs(corr) if np.isfinite(corr) else np.nan,
+            }
+        )
+    result = pd.DataFrame(rows)
+    return result.sort_values(
+        [absolute_column, "ticker"], ascending=[False, True], na_position="last"
+    ).reset_index(drop=True)
+
+
 def score_cl_relevance(
     panel: pd.DataFrame,
     cl_returns: pd.Series,
     min_overlap: int,
 ) -> pd.DataFrame:
-    rows: list[dict[str, object]] = []
-    for ticker in panel.columns:
-        pair = pd.concat([panel[ticker], cl_returns], axis=1).dropna()
-        corr = float(pair.iloc[:, 0].corr(pair.iloc[:, 1])) if len(pair) >= min_overlap else np.nan
-        rows.append(
-            {
-                "ticker": ticker,
-                "cl_overlap": int(len(pair)),
-                "cl_correlation": corr,
-                "cl_abs_correlation": abs(corr) if np.isfinite(corr) else np.nan,
-            }
-        )
-    result = pd.DataFrame(rows)
-    return result.sort_values(
-        ["cl_abs_correlation", "ticker"], ascending=[False, True], na_position="last"
-    ).reset_index(drop=True)
+    return score_commodity_relevance(panel, cl_returns, min_overlap, label="cl")
 
 
-def select_cl_seed_pool(scores: pd.DataFrame, size: int) -> pd.DataFrame:
-    eligible = scores.dropna(subset=["cl_correlation"]).copy()
+def select_commodity_seed_pool(
+    scores: pd.DataFrame,
+    size: int,
+    *,
+    label: str = "commodity",
+) -> pd.DataFrame:
+    label = label.lower().strip()
+    correlation_column = f"{label}_correlation"
+    absolute_column = f"{label}_abs_correlation"
+    eligible = scores.dropna(subset=[correlation_column]).copy()
     eligible = eligible.sort_values(
-        ["cl_abs_correlation", "ticker"], ascending=[False, True]
+        [absolute_column, "ticker"], ascending=[False, True]
     )
     if size > 0:
         eligible = eligible.head(size)
     eligible["seed_rank"] = np.arange(1, len(eligible) + 1)
     eligible["in_seed_pool"] = True
     return eligible.reset_index(drop=True)
+
+
+def select_cl_seed_pool(scores: pd.DataFrame, size: int) -> pd.DataFrame:
+    return select_commodity_seed_pool(scores, size, label="cl")
 
 
 def _drop_incomplete_pair_tickers(
@@ -178,7 +234,9 @@ def correlation_and_distance(
     complete, dropped = _drop_incomplete_pair_tickers(panel, min_pair_overlap)
     correlation = complete.corr(min_periods=min_pair_overlap).clip(-1.0, 1.0)
     if correlation.isna().to_numpy().any():
-        raise ValueError("Correlation matrix still contains missing values after overlap filtering")
+        raise ValueError(
+            "Correlation matrix still contains missing values after overlap filtering"
+        )
     distance = np.sqrt(np.maximum(0.0, 0.5 * (1.0 - correlation)))
     for diagonal_index in range(len(distance)):
         distance.iat[diagonal_index, diagonal_index] = 0.0
@@ -204,13 +262,16 @@ def average_linkage(distance: pd.DataFrame) -> np.ndarray:
         right_size = len(clusters[right])
         linkage_rows.append([left, right, merge_distance, left_size + right_size])
 
-        others = [cluster_id for cluster_id in clusters if cluster_id not in {left, right}]
+        others = [
+            cluster_id for cluster_id in clusters if cluster_id not in {left, right}
+        ]
         new_distances: dict[int, float] = {}
         for other in others:
             left_key = tuple(sorted((left, other)))
             right_key = tuple(sorted((right, other)))
             new_distances[other] = (
-                left_size * pair_distances[left_key] + right_size * pair_distances[right_key]
+                left_size * pair_distances[left_key]
+                + right_size * pair_distances[right_key]
             ) / (left_size + right_size)
 
         pair_distances = {
@@ -226,7 +287,9 @@ def average_linkage(distance: pd.DataFrame) -> np.ndarray:
     return np.asarray(linkage_rows, dtype=float)
 
 
-def cut_linkage(linkage: np.ndarray, tickers: list[str], cluster_count: int) -> pd.Series:
+def cut_linkage(
+    linkage: np.ndarray, tickers: list[str], cluster_count: int
+) -> pd.Series:
     n = len(tickers)
     if not 1 <= cluster_count <= n:
         raise ValueError("cluster_count must be between 1 and the number of tickers")
@@ -235,7 +298,9 @@ def cut_linkage(linkage: np.ndarray, tickers: list[str], cluster_count: int) -> 
         left, right = int(row[0]), int(row[1])
         clusters[n + merge_index] = clusters.pop(left) | clusters.pop(right)
 
-    ordered = sorted(clusters.values(), key=lambda members: min(tickers[i] for i in members))
+    ordered = sorted(
+        clusters.values(), key=lambda members: min(tickers[i] for i in members)
+    )
     labels: dict[str, int] = {}
     for cluster_id, members in enumerate(ordered, start=1):
         for member in members:
@@ -303,10 +368,24 @@ def analyze_annual_clusters(
     cl_returns: pd.Series,
     year: int,
     config: AnnualClusterConfig,
+    *,
+    relevance_label: str = "cl",
 ) -> AnnualClusterResult:
+    relevance_label = relevance_label.lower().strip()
+    correlation_column = f"{relevance_label}_correlation"
+    absolute_column = f"{relevance_label}_abs_correlation"
     panel, audit = build_annual_return_panel(processed, universe, year, config)
-    scores = score_cl_relevance(panel, cl_returns, config.min_cl_overlap)
-    seed_pool = select_cl_seed_pool(scores, config.seed_pool_size)
+    scores = score_commodity_relevance(
+        panel,
+        cl_returns,
+        config.min_cl_overlap,
+        label=relevance_label,
+    )
+    seed_pool = select_commodity_seed_pool(
+        scores,
+        config.seed_pool_size,
+        label=relevance_label,
+    )
     seed_panel = panel.reindex(columns=seed_pool["ticker"])
     correlation, distance, overlap_drops = correlation_and_distance(
         seed_panel, config.min_pair_overlap
@@ -322,7 +401,16 @@ def analyze_annual_clusters(
     labels = cut_linkage(linkage, list(distance.index), selected_k)
 
     metadata_columns = [
-        col for col in ["ticker", "theme", "role", "region", "exposure_role", "prior_weight", "notes"]
+        col
+        for col in [
+            "ticker",
+            "theme",
+            "role",
+            "region",
+            "exposure_role",
+            "prior_weight",
+            "notes",
+        ]
         if col in universe.columns
     ]
     assignments = seed_pool.merge(universe[metadata_columns], on="ticker", how="left")
@@ -330,9 +418,11 @@ def analyze_annual_clusters(
     assignments["year"] = year
     assignments["effective_year"] = year + 1
     assignments["cluster_id"] = assignments["ticker"].map(labels).astype(int)
-    assignments["return_observations"] = assignments["ticker"].map(panel.notna().sum()).astype(int)
+    assignments["return_observations"] = (
+        assignments["ticker"].map(panel.notna().sum()).astype(int)
+    )
     assignments["is_cluster_representative"] = False
-    representative_index = assignments.groupby("cluster_id")["cl_abs_correlation"].idxmax()
+    representative_index = assignments.groupby("cluster_id")[absolute_column].idxmax()
     assignments.loc[representative_index, "is_cluster_representative"] = True
 
     summary_rows: list[dict[str, object]] = []
@@ -341,7 +431,12 @@ def analyze_annual_clusters(
         sub_corr = correlation.loc[members, members]
         upper = sub_corr.to_numpy()[np.triu_indices(len(members), k=1)]
         representative = group.loc[group["is_cluster_representative"]].iloc[0]
-        role_counts = group.get("role", pd.Series(dtype=str)).fillna("unknown").value_counts()
+        role_counts = (
+            group.get("role", pd.Series(dtype=str)).fillna("unknown").value_counts()
+        )
+        theme_counts = (
+            group.get("theme", pd.Series(dtype=str)).fillna("unknown").value_counts()
+        )
         summary_rows.append(
             {
                 "year": year,
@@ -349,22 +444,40 @@ def analyze_annual_clusters(
                 "cluster_id": int(cluster_id),
                 "cluster_size": len(group),
                 "representative_ticker": representative["ticker"],
-                "representative_cl_correlation": representative["cl_correlation"],
-                "mean_within_correlation": float(np.mean(upper)) if len(upper) else np.nan,
-                "dominant_role": role_counts.index[0] if len(role_counts) else "unknown",
-                "dominant_role_share": float(role_counts.iloc[0] / len(group)) if len(role_counts) else np.nan,
+                f"representative_{relevance_label}_correlation": representative[
+                    correlation_column
+                ],
+                "mean_within_correlation": float(np.mean(upper))
+                if len(upper)
+                else np.nan,
+                "dominant_role": role_counts.index[0]
+                if len(role_counts)
+                else "unknown",
+                "dominant_role_share": float(role_counts.iloc[0] / len(group))
+                if len(role_counts)
+                else np.nan,
+                "dominant_theme": theme_counts.index[0]
+                if len(theme_counts)
+                else "unknown",
+                "dominant_theme_share": float(theme_counts.iloc[0] / len(group))
+                if len(theme_counts)
+                else np.nan,
                 "members": "+".join(members),
             }
         )
 
     audit = audit.merge(scores, on="ticker", how="left")
-    audit = audit.merge(seed_pool[["ticker", "seed_rank", "in_seed_pool"]], on="ticker", how="left")
+    audit = audit.merge(
+        seed_pool[["ticker", "seed_rank", "in_seed_pool"]], on="ticker", how="left"
+    )
     audit["in_seed_pool"] = audit["in_seed_pool"].fillna(False).astype(bool)
     audit["included_in_clustering"] = audit["ticker"].isin(distance.index)
-    audit.loc[audit["ticker"].isin(overlap_drops), "exclusion_reason"] = "insufficient_pair_overlap"
+    audit.loc[audit["ticker"].isin(overlap_drops), "exclusion_reason"] = (
+        "insufficient_pair_overlap"
+    )
     audit.loc[
         audit["included_for_cl_scoring"] & ~audit["in_seed_pool"], "exclusion_reason"
-    ] = "missing_cl_overlap_or_outside_seed_limit"
+    ] = f"missing_{relevance_label}_overlap_or_outside_seed_limit"
     audit.loc[audit["included_in_clustering"], "exclusion_reason"] = ""
 
     model_selection.insert(0, "year", year)
@@ -372,7 +485,9 @@ def analyze_annual_clusters(
     model_selection["seed_pool_count"] = len(distance)
     model_selection["selected_cluster_count"] = selected_k
     audit["effective_year"] = year + 1
-    assignments = assignments.sort_values(["cluster_id", "seed_rank"]).reset_index(drop=True)
+    assignments = assignments.sort_values(["cluster_id", "seed_rank"]).reset_index(
+        drop=True
+    )
     return AnnualClusterResult(
         assignments=assignments,
         cluster_summary=pd.DataFrame(summary_rows),

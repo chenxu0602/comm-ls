@@ -28,9 +28,13 @@ def build_cluster_evolution_tables(
     long_rows: list[dict[str, object]] = []
     ticker_cells: list[dict[str, object]] = []
     for (year, cluster_id), group in data.groupby(["year", "cluster_id"], sort=True):
-        group = group.sort_values(["seed_rank", "ticker"] if "seed_rank" in group.columns else ["ticker"])
+        group = group.sort_values(
+            ["seed_rank", "ticker"] if "seed_rank" in group.columns else ["ticker"]
+        )
         representatives = group.loc[group["is_cluster_representative"], "ticker"]
-        representative = representatives.iloc[0] if len(representatives) else group.iloc[0]["ticker"]
+        representative = (
+            representatives.iloc[0] if len(representatives) else group.iloc[0]["ticker"]
+        )
         role_counts = (
             group["role"].fillna("unknown").astype(str).value_counts()
             if "role" in group.columns
@@ -52,29 +56,49 @@ def build_cluster_evolution_tables(
             }
         )
         for ticker in members:
-            ticker_cells.append({"ticker": ticker, "year": year, "cluster": cluster_label})
+            ticker_cells.append(
+                {"ticker": ticker, "year": year, "cluster": cluster_label}
+            )
 
-    long_table = pd.DataFrame(long_rows).sort_values(["year", "cluster"]).reset_index(drop=True)
-    annual_wide = long_table.pivot(index="year", columns="cluster", values="display").reset_index()
+    long_table = (
+        pd.DataFrame(long_rows).sort_values(["year", "cluster"]).reset_index(drop=True)
+    )
+    annual_wide = long_table.pivot(
+        index="year", columns="cluster", values="display"
+    ).reset_index()
     annual_wide.columns.name = None
     effective = long_table.groupby("year")["effective_year"].first()
-    annual_wide.insert(1, "effective_year", annual_wide["year"].map(effective).astype(int))
+    annual_wide.insert(
+        1, "effective_year", annual_wide["year"].map(effective).astype(int)
+    )
     cluster_counts = long_table.groupby("year")["cluster"].nunique()
-    annual_wide.insert(2, "cluster_count", annual_wide["year"].map(cluster_counts).astype(int))
+    annual_wide.insert(
+        2, "cluster_count", annual_wide["year"].map(cluster_counts).astype(int)
+    )
 
-    ticker_wide = pd.DataFrame(ticker_cells).pivot(index="ticker", columns="year", values="cluster")
+    ticker_wide = pd.DataFrame(ticker_cells).pivot(
+        index="ticker", columns="year", values="cluster"
+    )
     ticker_wide = ticker_wide.reindex(sorted(ticker_wide.columns), axis=1).reset_index()
     ticker_wide.columns.name = None
     first_year = data.groupby("ticker")["year"].min()
     last_year = data.groupby("ticker")["year"].max()
-    ticker_wide.insert(1, "first_year", ticker_wide["ticker"].map(first_year).astype(int))
+    ticker_wide.insert(
+        1, "first_year", ticker_wide["ticker"].map(first_year).astype(int)
+    )
     ticker_wide.insert(2, "last_year", ticker_wide["ticker"].map(last_year).astype(int))
     return long_table, annual_wide, ticker_wide
 
 
-def render_cluster_evolution_markdown(long_table: pd.DataFrame) -> str:
+def render_cluster_evolution_markdown(
+    long_table: pd.DataFrame,
+    *,
+    title: str = "CL Annual Return Cluster Evolution",
+) -> str:
+    first_year = int(long_table["year"].min()) if not long_table.empty else ""
+    last_year = int(long_table["year"].max()) if not long_table.empty else ""
     lines = [
-        "# CL Annual Return Cluster Evolution, 2010-2025",
+        f"# {title}, {first_year}-{last_year}",
         "",
         "Cluster IDs are local to each estimation year and are not persistent sector identifiers. ",
         "A full-year classification for year Y is only usable without look-ahead from year Y+1.",

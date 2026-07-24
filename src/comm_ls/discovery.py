@@ -579,13 +579,20 @@ def build_daily_feature_return_cache(
         feature_columns=feature_columns,
     )
     aligned = aligned.rename(columns={"date": "commodity_feature_date", "arrival": "commodity_arrival"})
-    z = aligned[["signal_date", "commodity_feature_date", "commodity_arrival"]].copy()
+    standardized_features: dict[str, pd.Series] = {}
     for feature in feature_columns:
         value = pd.to_numeric(aligned[feature], errors="coerce")
-        z[f"feature_value__{feature}"] = value
+        standardized_features[f"feature_value__{feature}"] = value
         mean = value.rolling(feature_z_window, min_periods=min_feature_observations).mean()
         std = value.rolling(feature_z_window, min_periods=min_feature_observations).std()
-        z[f"feature_z__{feature}"] = (value - mean) / std
+        standardized_features[f"feature_z__{feature}"] = (value - mean) / std
+    z = pd.concat(
+        [
+            aligned[["signal_date", "commodity_feature_date", "commodity_arrival"]],
+            pd.DataFrame(standardized_features, index=aligned.index),
+        ],
+        axis=1,
+    )
 
     missing_return_columns = sorted(set(return_columns).difference(stock.columns))
     if missing_return_columns:
