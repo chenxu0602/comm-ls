@@ -68,6 +68,52 @@ NG_MIN_STRIP_MONTHS = 3
 # CME fallback uses dollars/lb. Normalize only at ingestion; raw sources retain
 # their native vendor units.
 LIVE_PRICE_SCALE_BY_SYMBOL = {"HG": 100.0}
+PRICE_SCALE_DISCONTINUITY_RATIO_BY_SYMBOL = {"HG": 20.0}
+
+
+def _validate_normalized_price_scale(
+    market: pd.DataFrame,
+    *,
+    symbol: str,
+    context: str,
+) -> None:
+    """Fail closed when normalized prices still look split across units."""
+    threshold = PRICE_SCALE_DISCONTINUITY_RATIO_BY_SYMBOL.get(symbol.upper())
+    if threshold is None or market.empty:
+        return
+
+    required = {"date", "contract", "settle"}
+    if not required.issubset(market.columns):
+        return
+
+    prices = market.loc[:, ["date", "contract", "settle"]].copy()
+    prices["date"] = pd.to_datetime(prices["date"], errors="coerce")
+    prices["contract"] = prices["contract"].astype("string").str.strip().str.upper()
+    prices["settle"] = pd.to_numeric(prices["settle"], errors="coerce")
+    prices = prices.dropna().loc[lambda frame: frame["settle"].gt(0)]
+    if prices.empty:
+        return
+
+    prices = prices.sort_values(["contract", "date"])
+    prior = prices.groupby("contract", observed=True)["settle"].shift(1)
+    adjacent_ratio = pd.concat(
+        [prices["settle"] / prior, prior / prices["settle"]], axis=1
+    ).max(axis=1)
+
+    daily = prices.groupby("date", observed=True)["settle"].agg(["min", "max"])
+    cross_contract_ratio = daily["max"] / daily["min"]
+    worst_adjacent = adjacent_ratio.max(skipna=True)
+    worst_cross_contract = cross_contract_ratio.max(skipna=True)
+    worst_ratio = max(
+        float(worst_adjacent) if pd.notna(worst_adjacent) else 1.0,
+        float(worst_cross_contract) if pd.notna(worst_cross_contract) else 1.0,
+    )
+    if worst_ratio >= threshold:
+        raise ValueError(
+            f"{symbol.upper()} normalized prices contain a possible unit-scale "
+            f"discontinuity in {context}: maximum price ratio {worst_ratio:.2f} "
+            f"exceeds the {threshold:.2f} validation threshold"
+        )
 
 
 def _rolling_z(value: pd.Series, window: int = 252, min_periods: int = 63) -> pd.Series:
@@ -205,6 +251,11 @@ def _load_contract_market_data(symbol_dir: Path) -> pd.DataFrame:
     if not frames:
         return pd.DataFrame(columns=["date", "contract", "settle", "volume", "open_interest"])
     out = _prefer_historical_contract_rows(pd.concat(frames, ignore_index=True))
+    _validate_normalized_price_scale(
+        out,
+        symbol=symbol_dir.name,
+        context=str(symbol_dir),
+    )
     out["contract_month"] = _contract_month_start(out["contract"])
     return out.drop(columns=["source_priority"]).dropna(subset=["date", "contract_month"]).reset_index(drop=True)
 
@@ -417,6 +468,23 @@ def load_carry_file(path: Path) -> pd.DataFrame:
                     df[contract_column].eq(df[contract_column].shift(1))
                 )
                 df.loc[live_unit_rows, return_column] = recomputed.loc[live_unit_rows]
+
+        price_rows = []
+        for leg in ("M0", "M1", "M2"):
+            settle_column = f"{leg}_settle"
+            contract_column = f"{leg}_con"
+            if {settle_column, contract_column}.issubset(df.columns):
+                price_rows.append(
+                    df.loc[:, ["date", contract_column, settle_column]].rename(
+                        columns={contract_column: "contract", settle_column: "settle"}
+                    )
+                )
+        if price_rows:
+            _validate_normalized_price_scale(
+                pd.concat(price_rows, ignore_index=True),
+                symbol=path.stem,
+                context=str(path),
+            )
     return df
 
 

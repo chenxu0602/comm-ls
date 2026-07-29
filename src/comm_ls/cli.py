@@ -12,6 +12,7 @@ from comm_ls.beta import (
     DEFAULT_PROCESSED_BETA_VARIATIONS,
     build_equity_beta_returns_from_paths,
     build_equity_processed_dataset_from_paths,
+    configured_hedge_tickers,
 )
 from comm_ls.candidates import build_candidate_signals_from_paths
 from comm_ls.commodity import build_commodity_signal_frame, load_carry_directory, write_frame
@@ -133,9 +134,6 @@ DEFAULT_EXCLUDED_BROAD_UNIVERSE_TICKERS = [
     "CRAK",
 ]
 
-DEFAULT_LIVE_HEDGE_TICKERS = ["SPY", "XLE", "XME"]
-
-
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="comm-ls")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -152,6 +150,13 @@ def build_parser() -> argparse.ArgumentParser:
 
     download = subparsers.add_parser("download-equities")
     download.add_argument("--universe", type=Path, default=Path("config/us_commodity_equity_seed.csv"))
+    download.add_argument("--theme-hedges", type=Path, default=Path("config/theme_sector_hedges.csv"))
+    download.add_argument(
+        "--ticker-hedges",
+        type=Path,
+        default=Path("config/ticker_sector_hedges.csv"),
+    )
+    download.add_argument("--market-ticker", default="SPY")
     download.add_argument("--output-dir", type=Path, default=Path("data/equity/yfinance"))
     download.add_argument("--start", default="2000-01-01")
     download.add_argument("--end", default=None)
@@ -160,7 +165,7 @@ def build_parser() -> argparse.ArgumentParser:
     download.add_argument(
         "--no-default-hedges",
         action="store_true",
-        help="Do not append the production hedge tickers SPY, XLE, and XME to a full-universe download.",
+        help="Do not append configured market and sector hedge tickers to a full-universe download.",
     )
     download.add_argument(
         "--auto-adjust",
@@ -243,7 +248,7 @@ def build_parser() -> argparse.ArgumentParser:
     sensitivity_matrix.add_argument("--feature", action="append", default=None)
     sensitivity_matrix.add_argument(
         "--feature-preset",
-        choices=["priority", "curve_shock_vol", "broad"],
+        choices=["priority", "curve_shock_vol", "broad", "metals_complex"],
         default="priority",
     )
     sensitivity_matrix.add_argument("--horizon", action="append", type=int, default=None)
@@ -263,7 +268,7 @@ def build_parser() -> argparse.ArgumentParser:
     feature_return_cache.add_argument("--feature", action="append", default=None)
     feature_return_cache.add_argument(
         "--feature-preset",
-        choices=["priority", "curve_shock_vol", "broad"],
+        choices=["priority", "curve_shock_vol", "broad", "metals_complex"],
         default="priority",
     )
     feature_return_cache.add_argument("--horizon", action="append", type=int, default=None)
@@ -525,6 +530,11 @@ def build_parser() -> argparse.ArgumentParser:
     beta.add_argument("--prices-dir", type=Path, default=Path("data/equity/yfinance"))
     beta.add_argument("--universe", type=Path, default=Path("config/us_commodity_equity_seed.csv"))
     beta.add_argument("--theme-hedges", type=Path, default=Path("config/theme_sector_hedges.csv"))
+    beta.add_argument(
+        "--ticker-hedges",
+        type=Path,
+        default=Path("config/ticker_sector_hedges.csv"),
+    )
     beta.add_argument("--output", type=Path, default=Path("data/processed/equity_beta_returns.parquet"))
     beta.add_argument("--market-ticker", default="SPY")
     beta.add_argument("--beta-lookback-days", type=int, default=252)
@@ -542,6 +552,11 @@ def build_parser() -> argparse.ArgumentParser:
     equity_processed.add_argument("--prices-dir", type=Path, default=Path("data/equity/yfinance"))
     equity_processed.add_argument("--universe", type=Path, default=Path("config/us_commodity_equity_seed.csv"))
     equity_processed.add_argument("--theme-hedges", type=Path, default=Path("config/theme_sector_hedges.csv"))
+    equity_processed.add_argument(
+        "--ticker-hedges",
+        type=Path,
+        default=Path("config/ticker_sector_hedges.csv"),
+    )
     equity_processed.add_argument("--output", type=Path, default=Path("data/processed/equity_processed.parquet"))
     equity_processed.add_argument("--commodity-signals", type=Path, default=Path("data/processed/commodity_signals.parquet"))
     equity_processed.add_argument("--exposure-map", type=Path, default=Path("config/commodity_exposure_map.csv"))
@@ -2054,11 +2069,17 @@ def main() -> None:
                 tickers = tickers[: args.limit]
             if not args.no_default_hedges:
                 existing = set(tickers)
-                appended_hedges = [ticker for ticker in DEFAULT_LIVE_HEDGE_TICKERS if ticker not in existing]
+                required_hedges = configured_hedge_tickers(
+                    universe_path=args.universe,
+                    theme_hedges_path=args.theme_hedges,
+                    ticker_hedges_path=args.ticker_hedges,
+                    market_ticker=args.market_ticker,
+                )
+                appended_hedges = [ticker for ticker in required_hedges if ticker not in existing]
                 tickers.extend(appended_hedges)
                 print(
-                    "[download-equities] production hedges ensured: "
-                    + ", ".join(DEFAULT_LIVE_HEDGE_TICKERS)
+                    "[download-equities] configured hedges ensured: "
+                    + ", ".join(required_hedges)
                     + (f" (appended: {', '.join(appended_hedges)})" if appended_hedges else " (already present)"),
                     flush=True,
                 )
@@ -2600,6 +2621,7 @@ def main() -> None:
             prices_dir=args.prices_dir,
             universe_path=args.universe,
             theme_hedges_path=args.theme_hedges,
+            ticker_hedges_path=args.ticker_hedges,
             output_path=args.output,
             market_ticker=args.market_ticker,
             beta_lookback_days=args.beta_lookback_days,
@@ -2622,6 +2644,7 @@ def main() -> None:
             prices_dir=args.prices_dir,
             universe_path=args.universe,
             theme_hedges_path=args.theme_hedges,
+            ticker_hedges_path=args.ticker_hedges,
             output_path=args.output,
             commodity_signals_path=args.commodity_signals,
             exposure_map_path=args.exposure_map,

@@ -23,6 +23,7 @@ CHEMICAL_SHORT_EXIT_LEVEL = -0.05
 SHIPPING_CARRY_CHANGE_LOOKBACK_DAYS = 20
 SHIPPING_CARRY_CHANGE_RESET_LEVEL = 0.01
 SHIPPING_MOMENTUM_FEATURE = "front_log_ret_5d_v2"
+FEATURE_OBSERVED_PREFIX = "__feature_observed__"
 SERVICE_VOL_LOOKBACK_DAYS = 60
 SERVICE_VOL_MIN_PERIODS = 30
 SERVICE_ENTRY_VOL_MULTIPLE = 2.0
@@ -44,6 +45,7 @@ class SleeveConfig:
     internal_weights: dict[str, float]
     signal_rule: str = "hysteresis"
     auxiliary_features: tuple[str, ...] = ()
+    combined_share_rounding: bool = False
 
 
 # Source of truth: notebooks/backtest_cl.ipynb, cells 1 and 4-11.
@@ -57,8 +59,8 @@ CL_V32_SLEEVE_CONFIG: dict[str, SleeveConfig] = {
         feature="activity_deferred_annualized_carry_chg_21d",
         threshold=0.01,
         side_mult=1,
-        position_mode="rolling_mean",
-        hold_days=None,
+        position_mode="rolling_fixed_hold",
+        hold_days=5,
         rolling_days=5,
         sector_hedge="XLE",
         internal_weights={"PSX": 1.00},
@@ -84,10 +86,11 @@ CL_V32_SLEEVE_CONFIG: dict[str, SleeveConfig] = {
         threshold=0.06,
         side_mult=-1,
         position_mode="fixed_hold",
-        hold_days=10,
+        hold_days=5,
         rolling_days=None,
         sector_hedge=None,
         internal_weights={"MUSA": 0.40, "CASY": 0.60},
+        combined_share_rounding=True,
     ),
     "services": SleeveConfig(
         weight=0.10,
@@ -96,9 +99,9 @@ CL_V32_SLEEVE_CONFIG: dict[str, SleeveConfig] = {
         feature="carry_chg_21d",
         threshold=0.10,
         side_mult=-1,
-        position_mode="rolling_mean",
+        position_mode="sign",
         hold_days=None,
-        rolling_days=2,
+        rolling_days=None,
         sector_hedge="XLE",
         internal_weights={"FTI": 0.25, "OII": 0.25, "SLB": 0.25, "HAL": 0.25},
         signal_rule="service_volatility_hysteresis",
@@ -112,7 +115,7 @@ CL_V32_SLEEVE_CONFIG: dict[str, SleeveConfig] = {
         side_mult=-1,
         position_mode="rolling_mean",
         hold_days=None,
-        rolling_days=5,
+        rolling_days=2,
         sector_hedge="XLE",
         internal_weights={
             "DHT": 0.30,
@@ -167,7 +170,7 @@ CL_V32_SLEEVE_CONFIG: dict[str, SleeveConfig] = {
         threshold=0.02,
         side_mult=-1,
         position_mode="fixed_hold",
-        hold_days=10,
+        hold_days=5,
         rolling_days=None,
         sector_hedge="XME",
         internal_weights={"ERO": 0.50, "TECK": 0.50},
@@ -183,11 +186,13 @@ def validate_config(config: dict[str, SleeveConfig]) -> None:
             raise ValueError(f"{sleeve} internal weights do not match its ticker list")
         if not np.isclose(sum(cfg.internal_weights.values()), 1.0):
             raise ValueError(f"{sleeve} internal weights must sum to 1")
-        if cfg.position_mode == "fixed_hold" and not cfg.hold_days:
-            raise ValueError(f"{sleeve} fixed_hold mode requires hold_days")
+        if cfg.position_mode in {"fixed_hold", "rolling_fixed_hold"} and not cfg.hold_days:
+            raise ValueError(f"{sleeve} {cfg.position_mode} mode requires hold_days")
         if cfg.position_mode == "rolling_mean" and not cfg.rolling_days:
             raise ValueError(f"{sleeve} rolling_mean mode requires rolling_days")
-        if cfg.position_mode not in {"sign", "fixed_hold", "rolling_mean"}:
+        if cfg.position_mode == "rolling_fixed_hold" and not cfg.rolling_days:
+            raise ValueError(f"{sleeve} rolling_fixed_hold mode requires rolling_days")
+        if cfg.position_mode not in {"sign", "fixed_hold", "rolling_mean", "rolling_fixed_hold"}:
             raise ValueError(f"{sleeve} has unknown position mode {cfg.position_mode}")
         if cfg.signal_rule not in {
             "hysteresis",
@@ -230,14 +235,28 @@ def align_features_to_calendar(features: pd.DataFrame, calendar: pd.Index) -> pd
     source.index = normalize_index(source.index)
     source = source.groupby(source.index).last().sort_index()
     union = source.index.union(calendar).sort_values()
-    aligned = source.reindex(union).ffill()
+    feature_columns = [col for col in source.columns if not col.startswith(FEATURE_OBSERVED_PREFIX)]
+    aligned = pd.DataFrame(index=union)
 
-    for feature in RESET_ON_EXPLICIT_NAN_FEATURES.intersection(source.columns):
-        # True/False is carried only across dates absent from the source. An
-        # explicit source NaN flips the validity state to False until a new
-        # valid observation arrives.
-        valid_state = source[feature].notna().reindex(union).ffill().fillna(False)
-        aligned[feature] = aligned[feature].where(valid_state)
+    for feature in feature_columns:
+        observed_col = f"{FEATURE_OBSERVED_PREFIX}{feature}"
+        if observed_col in source.columns:
+            # In a multi-symbol panel, NaN can mean either an explicit invalid
+            # observation or simply that another commodity supplied this date.
+            observed = source[observed_col].fillna(False).astype(bool)
+            feature_source = source.loc[observed, feature]
+            values = feature_source.reindex(union).ffill()
+            # The production loader marks actual commodity observations, so
+            # an observed NaN must reset the signal just as it does in cache.
+            valid_state = feature_source.notna().reindex(union).ffill().fillna(False)
+            aligned[feature] = values.where(valid_state)
+        else:
+            feature_source = source[feature]
+            values = feature_source.reindex(union).ffill()
+            if feature in RESET_ON_EXPLICIT_NAN_FEATURES:
+                valid_state = feature_source.notna().reindex(union).ffill().fillna(False)
+                values = values.where(valid_state)
+            aligned[feature] = values
 
     return aligned.reindex(calendar)
 
@@ -383,10 +402,13 @@ def fixed_hold_position(sig: pd.Series, hold_days: int, execution_lag: int = 1) 
         if start >= len(values):
             continue
         if i <= active_until:
-            if signal == active_signal and start == active_until + 1:
+            # Every same-direction observation refreshes the minimum hold from
+            # its execution date. Opposite observations are ignored until the
+            # active window expires.
+            if np.sign(signal) == np.sign(active_signal):
                 end = min(end, len(values))
                 pos[start:end] = signal
-                active_until = end - 1
+                active_until = max(active_until, end - 1)
             continue
         end = min(end, len(values))
         pos[start:end] = signal
@@ -401,6 +423,9 @@ def position_from_signal(signal: pd.Series, cfg: SleeveConfig) -> pd.Series:
         return signal.shift(1).fillna(0.0)
     if cfg.position_mode == "rolling_mean":
         return signal.rolling(cfg.rolling_days).mean().shift(1).fillna(0.0)
+    if cfg.position_mode == "rolling_fixed_hold":
+        smoothed = signal.rolling(cfg.rolling_days).mean()
+        return fixed_hold_position(smoothed, hold_days=int(cfg.hold_days))
     if cfg.position_mode == "fixed_hold":
         return fixed_hold_position(signal, hold_days=int(cfg.hold_days))
     raise ValueError(f"Unknown position mode: {cfg.position_mode}")

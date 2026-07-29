@@ -6,6 +6,8 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+from comm_ls.commodity import REQUIRED_CARRY_COLUMNS, load_carry_file
+
 
 @dataclass(frozen=True)
 class AnnualClusterConfig:
@@ -72,7 +74,11 @@ def load_commodity_simple_returns(
     *,
     name: str = "commodity_return",
 ) -> pd.Series:
-    frame = pd.read_csv(path, usecols=["date", "m0_ret"])
+    columns = pd.read_csv(path, nrows=0).columns
+    if REQUIRED_CARRY_COLUMNS.issubset(columns):
+        frame = load_carry_file(path).loc[:, ["date", "m0_ret"]]
+    else:
+        frame = pd.read_csv(path, usecols=["date", "m0_ret"])
     frame["date"] = pd.to_datetime(frame["date"], errors="coerce")
     frame["m0_ret"] = pd.to_numeric(frame["m0_ret"], errors="coerce")
     frame = (

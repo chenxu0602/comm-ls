@@ -29,6 +29,11 @@ def load_commodity_exposure_map(path: Path) -> pd.DataFrame:
     df["commodity"] = df["commodity"].astype(str).str.upper().str.strip()
     df["exposure_role"] = df["exposure_role"].astype(str).str.strip()
     df["prior_weight"] = pd.to_numeric(df["prior_weight"], errors="coerce")
+    for column in ["effective_start_date", "effective_end_date"]:
+        if column not in df.columns:
+            df[column] = pd.NaT
+        else:
+            df[column] = pd.to_datetime(df[column], errors="coerce")
     return df.dropna(subset=["ticker", "commodity", "prior_weight"]).drop_duplicates(
         ["ticker", "commodity"]
     ).reset_index(drop=True)
@@ -44,6 +49,20 @@ def get_exposure_universe(
         exposure = exposure[exposure["commodity"] == commodity.upper().strip()].copy()
     exposure = exposure[exposure["prior_weight"].abs() >= min_abs_prior_weight].copy()
     return exposure.sort_values(["commodity", "ticker"]).reset_index(drop=True)
+
+
+def _security_identity_at_date(
+    history: pd.DataFrame,
+    canonical_ticker: str,
+) -> tuple[str, str]:
+    latest = history.iloc[-1]
+    historical_ticker = latest.get("historical_ticker", canonical_ticker)
+    security_id = latest.get("security_id", canonical_ticker)
+    if pd.isna(historical_ticker):
+        historical_ticker = canonical_ticker
+    if pd.isna(security_id):
+        security_id = canonical_ticker
+    return str(historical_ticker), str(security_id)
 
 
 def build_quarterly_liquidity_universe(
@@ -81,11 +100,14 @@ def build_quarterly_liquidity_universe(
             adv = float(hist["dollar_volume"].mean())
             if price < min_price or adv < min_adv:
                 continue
+            historical_ticker, security_id = _security_identity_at_date(hist, ticker)
 
             rows.append(
                 {
                     "rebalance_date": rebalance_date,
                     "ticker": ticker,
+                    "historical_ticker": historical_ticker,
+                    "security_id": security_id,
                     "theme": meta["theme"],
                     "role": meta["role"],
                     "price": price,
@@ -183,6 +205,7 @@ def build_broad_quarterly_liquidity_universe(
             adv = float(hist["dollar_volume"].mean())
             if price < min_price or adv < min_adv:
                 continue
+            historical_ticker, security_id = _security_identity_at_date(history, ticker)
 
             meta = meta_by_ticker.get(ticker, {})
             rows.append(
@@ -192,6 +215,8 @@ def build_broad_quarterly_liquidity_universe(
                     "asof_date": asof_date.date().isoformat(),
                     "pit_data_cutoff": asof_date.date().isoformat(),
                     "ticker": ticker,
+                    "historical_ticker": historical_ticker,
+                    "security_id": security_id,
                     "theme": meta.get("theme", "unknown"),
                     "role": meta.get("role", "unknown"),
                     "region": meta.get("region", "unknown"),
@@ -325,6 +350,13 @@ def build_commodity_quarterly_universes(
             continue
 
         for _, meta in exposure.iterrows():
+            effective_start = meta.get("effective_start_date")
+            effective_end = meta.get("effective_end_date")
+            if pd.notna(effective_start) and asof_date < pd.Timestamp(effective_start):
+                continue
+            if pd.notna(effective_end) and asof_date > pd.Timestamp(effective_end):
+                continue
+
             ticker = str(meta["ticker"])
             ticker_prices = grouped_prices.get(ticker)
             if ticker_prices is None:
@@ -348,6 +380,7 @@ def build_commodity_quarterly_universes(
             median_dollar_volume = float(hist["dollar_volume"].median())
             if price < min_price or adv < min_adv:
                 continue
+            historical_ticker, security_id = _security_identity_at_date(history, ticker)
 
             rows.append(
                 {
@@ -357,6 +390,8 @@ def build_commodity_quarterly_universes(
                     "pit_data_cutoff": asof_date.date().isoformat(),
                     "commodity": str(meta["commodity"]),
                     "ticker": ticker,
+                    "historical_ticker": historical_ticker,
+                    "security_id": security_id,
                     "theme": str(meta["theme"]),
                     "primary_role": str(meta["primary_role"]),
                     "exposure_role": str(meta["exposure_role"]),
@@ -392,6 +427,8 @@ def build_commodity_quarterly_universes(
         "pit_data_cutoff",
         "commodity",
         "ticker",
+        "historical_ticker",
+        "security_id",
         "theme",
         "primary_role",
         "exposure_role",

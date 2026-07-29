@@ -79,6 +79,69 @@ def _load_theme_hedges(path: Path) -> dict[str, str]:
     }
 
 
+def _load_ticker_hedges(path: Path | None) -> dict[str, str]:
+    if path is None:
+        return {}
+    df = pd.read_csv(path)
+    required = {"ticker", "sector_ticker"}
+    missing = required.difference(df.columns)
+    if missing:
+        raise ValueError(f"{path} is missing required columns: {sorted(missing)}")
+    normalized = df.copy()
+    normalized["ticker"] = normalized["ticker"].astype(str).str.upper().str.strip()
+    normalized["sector_ticker"] = (
+        normalized["sector_ticker"].astype(str).str.upper().str.strip()
+    )
+    duplicate_tickers = normalized.loc[
+        normalized["ticker"].duplicated(keep=False), "ticker"
+    ].unique()
+    if len(duplicate_tickers):
+        raise ValueError(
+            f"{path} has duplicate ticker hedge rows for: {sorted(duplicate_tickers)}"
+        )
+    return dict(zip(normalized["ticker"], normalized["sector_ticker"], strict=True))
+
+
+def _resolve_sector_hedge(
+    ticker: str,
+    theme: str,
+    theme_hedges: dict[str, str],
+    ticker_hedges: dict[str, str],
+    market_ticker: str,
+) -> tuple[str, str]:
+    if ticker in ticker_hedges:
+        return ticker_hedges[ticker], "ticker_override"
+    if theme in theme_hedges:
+        return theme_hedges[theme], "theme_default"
+    return market_ticker, "market_fallback"
+
+
+def configured_hedge_tickers(
+    universe_path: Path,
+    theme_hedges_path: Path,
+    ticker_hedges_path: Path | None = None,
+    market_ticker: str = "SPY",
+) -> list[str]:
+    """Return the exact market/sector ETF set required by a seed universe."""
+    seed = load_seed_universe(universe_path)
+    theme_hedges = _load_theme_hedges(theme_hedges_path)
+    ticker_hedges = _load_ticker_hedges(ticker_hedges_path)
+    market_ticker = market_ticker.upper().strip()
+    required = {market_ticker}
+    for stock in seed.itertuples(index=False):
+        ticker = str(stock.ticker).upper().strip()
+        theme = str(stock.theme).strip()
+        sector_ticker, _ = _resolve_sector_hedge(
+            ticker=ticker,
+            theme=theme,
+            theme_hedges=theme_hedges,
+            ticker_hedges=ticker_hedges,
+            market_ticker=market_ticker,
+        )
+        required.add(sector_ticker)
+    return sorted(required)
+
+
 def _price_matrix(prices: pd.DataFrame) -> pd.DataFrame:
     required = {"ticker", "date", "close"}
     missing = required.difference(prices.columns)
@@ -466,9 +529,11 @@ def build_equity_beta_returns(
     beta_half_life_months: float = 3.0,
     beta_smoothing: float = 0.0,
     hedge_ratio_scale: float = 1.0,
+    ticker_hedges_path: Path | None = None,
 ) -> pd.DataFrame:
     seed = load_seed_universe(universe_path)
     theme_hedges = _load_theme_hedges(theme_hedges_path)
+    ticker_hedges = _load_ticker_hedges(ticker_hedges_path)
     prices = load_price_directory(prices_dir)
     matrix = _price_matrix(prices)
     returns = np.log(matrix).diff()
@@ -480,7 +545,14 @@ def build_equity_beta_returns(
     )
 
     market_ticker = market_ticker.upper()
-    required_hedges = {market_ticker, *theme_hedges.values()}
+    required_hedges = set(
+        configured_hedge_tickers(
+            universe_path=universe_path,
+            theme_hedges_path=theme_hedges_path,
+            ticker_hedges_path=ticker_hedges_path,
+            market_ticker=market_ticker,
+        )
+    )
     missing = sorted(ticker for ticker in required_hedges if ticker not in returns.columns or ticker not in beta_returns.columns)
     if missing:
         raise ValueError(f"Missing hedge ticker price data: {missing}")
@@ -491,8 +563,14 @@ def build_equity_beta_returns(
         if ticker not in returns.columns:
             continue
 
-        theme = str(stock.theme)
-        sector_ticker = theme_hedges.get(theme, market_ticker)
+        theme = str(stock.theme).strip()
+        sector_ticker, sector_hedge_source = _resolve_sector_hedge(
+            ticker=ticker,
+            theme=theme,
+            theme_hedges=theme_hedges,
+            ticker_hedges=ticker_hedges,
+            market_ticker=market_ticker,
+        )
         if sector_ticker not in returns.columns:
             continue
 
@@ -520,6 +598,7 @@ def build_equity_beta_returns(
         calc["region"] = getattr(stock, "region", None)
         calc["market_ticker"] = market_ticker
         calc["sector_ticker"] = sector_ticker
+        calc["sector_hedge_source"] = sector_hedge_source
         calc["adj_close"] = matrix[ticker].reindex(calc["date"]).to_numpy()
         calc["beta_return_frequency"] = beta_return_frequency
         calc["beta_update_frequency"] = beta_update_frequency
@@ -544,6 +623,7 @@ def build_equity_beta_returns(
         "raw_return",
         "market_ticker",
         "sector_ticker",
+        "sector_hedge_source",
         "market_return",
         "sector_return",
         "market_beta",
@@ -666,6 +746,7 @@ def build_equity_processed_dataset(
     commodity_return_column: str = DEFAULT_COMMODITY_BETA_RETURN_COLUMN,
     include_commodity_beta_residuals: bool = True,
     progress: bool = False,
+    ticker_hedges_path: Path | None = None,
 ) -> pd.DataFrame:
     started = perf_counter()
 
@@ -678,7 +759,11 @@ def build_equity_processed_dataset(
     seed = load_seed_universe(universe_path)
     log(f"loaded {len(seed):,} seed tickers; loading theme hedges from {theme_hedges_path}")
     theme_hedges = _load_theme_hedges(theme_hedges_path)
-    log(f"loaded {len(theme_hedges):,} theme hedges; loading prices from {prices_dir}")
+    ticker_hedges = _load_ticker_hedges(ticker_hedges_path)
+    log(
+        f"loaded {len(theme_hedges):,} theme hedges and "
+        f"{len(ticker_hedges):,} ticker overrides; loading prices from {prices_dir}"
+    )
     prices = load_price_directory(prices_dir)
     price_tickers = prices["ticker"].nunique() if "ticker" in prices.columns else 0
     log(f"loaded {len(prices):,} price rows across {price_tickers:,} tickers")
@@ -747,7 +832,14 @@ def build_equity_processed_dataset(
             )
         )
 
-    required_hedges = {market_ticker, *theme_hedges.values()}
+    required_hedges = set(
+        configured_hedge_tickers(
+            universe_path=universe_path,
+            theme_hedges_path=theme_hedges_path,
+            ticker_hedges_path=ticker_hedges_path,
+            market_ticker=market_ticker,
+        )
+    )
     missing = sorted(ticker for ticker in required_hedges if ticker not in daily_returns.columns)
     if missing:
         raise ValueError(f"Missing hedge ticker price data: {missing}")
@@ -767,8 +859,14 @@ def build_equity_processed_dataset(
         if ticker not in daily_returns.columns:
             skipped_missing_price += 1
             continue
-        theme = str(stock.theme)
-        sector_ticker = theme_hedges.get(theme, market_ticker)
+        theme = str(stock.theme).strip()
+        sector_ticker, sector_hedge_source = _resolve_sector_hedge(
+            ticker=ticker,
+            theme=theme,
+            theme_hedges=theme_hedges,
+            ticker_hedges=ticker_hedges,
+            market_ticker=market_ticker,
+        )
         if sector_ticker not in daily_returns.columns:
             skipped_missing_hedge += 1
             continue
@@ -780,6 +878,7 @@ def build_equity_processed_dataset(
                 "market_return": daily_returns[market_ticker].to_numpy(),
                 "sector_return": daily_returns[sector_ticker].to_numpy(),
                 "sector_ticker": sector_ticker,
+                "sector_hedge_source": sector_hedge_source,
             }
         )
         for variation in beta_variations:
@@ -920,6 +1019,7 @@ def build_equity_processed_dataset(
         "raw_return",
         "market_ticker",
         "sector_ticker",
+        "sector_hedge_source",
         "market_return",
         "sector_return",
         "market_beta",
@@ -964,6 +1064,7 @@ def build_equity_processed_dataset_from_paths(
     commodity_return_column: str = DEFAULT_COMMODITY_BETA_RETURN_COLUMN,
     include_commodity_beta_residuals: bool = True,
     progress: bool = False,
+    ticker_hedges_path: Path | None = None,
 ) -> pd.DataFrame:
     dataset = build_equity_processed_dataset(
         prices_dir=prices_dir,
@@ -981,6 +1082,7 @@ def build_equity_processed_dataset_from_paths(
         commodity_return_column=commodity_return_column,
         include_commodity_beta_residuals=include_commodity_beta_residuals,
         progress=progress,
+        ticker_hedges_path=ticker_hedges_path,
     )
     output_path.parent.mkdir(parents=True, exist_ok=True)
     if progress:
@@ -1010,6 +1112,7 @@ def build_equity_beta_returns_from_paths(
     beta_half_life_months: float = 3.0,
     beta_smoothing: float = 0.0,
     hedge_ratio_scale: float = 1.0,
+    ticker_hedges_path: Path | None = None,
 ) -> pd.DataFrame:
     beta_returns = build_equity_beta_returns(
         prices_dir=prices_dir,
@@ -1026,6 +1129,7 @@ def build_equity_beta_returns_from_paths(
         beta_half_life_months=beta_half_life_months,
         beta_smoothing=beta_smoothing,
         hedge_ratio_scale=hedge_ratio_scale,
+        ticker_hedges_path=ticker_hedges_path,
     )
     output_path.parent.mkdir(parents=True, exist_ok=True)
     if output_path.suffix == ".parquet":

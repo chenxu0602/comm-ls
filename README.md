@@ -217,10 +217,15 @@ uv run comm-ls build-equity-processed-dataset \
   --prices-dir data/equity/yfinance \
   --universe config/us_commodity_equity_seed.csv \
   --theme-hedges config/theme_sector_hedges.csv \
+  --ticker-hedges config/ticker_sector_hedges.csv \
   --commodity-signals data/processed/commodity_signals.parquet \
   --exposure-map config/commodity_exposure_map.csv \
   --output data/processed/equity_processed.parquet
 ```
+
+Ticker-level sector hedges take precedence over theme defaults. This allows
+copper miners to retain `XME` while HG-sensitive cable and grid companies use
+`XLI` or `XLK`. See `docs/hg_cable_grid_data_pipeline.md`.
 
 Important return columns:
 

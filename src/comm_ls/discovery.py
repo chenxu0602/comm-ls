@@ -211,10 +211,27 @@ BROAD_DISCOVERY_FEATURES = [
     *FRONT_PRICE_REGIME_FEATURES,
     *CURVE_SHOCK_VOL_FEATURES,
 ]
+METALS_COMPLEX_DISCOVERY_FEATURES = [
+    "gc_hg_relative_log_price_index",
+    "gc_hg_relative_log_momentum_21d",
+    "gc_hg_relative_log_momentum_63d",
+    "gc_hg_relative_log_accel_21d_vs_63d",
+    "gc_hg_liquid_deferred_carry_spread",
+    "gc_hg_liquid_deferred_carry_spread_same_contract_chg_21d",
+    "si_gc_relative_log_price_index",
+    "si_gc_relative_log_momentum_21d",
+    "si_gc_relative_log_momentum_63d",
+    "si_gc_relative_log_accel_21d_vs_63d",
+    "si_gc_liquid_deferred_carry_spread",
+    "si_gc_liquid_deferred_carry_spread_same_contract_chg_21d",
+    "hg_gc_matched_ratio_ma_gap_3d_50d_raw",
+    "hg_gc_matched_ratio_ma_gap_3d_50d_chained",
+]
 DISCOVERY_FEATURE_PRESETS = {
     "priority": BROAD_DISCOVERY_FEATURES,
     "curve_shock_vol": CURVE_SHOCK_VOL_FEATURES,
     "broad": BROAD_DISCOVERY_FEATURES,
+    "metals_complex": METALS_COMPLEX_DISCOVERY_FEATURES,
 }
 FIRST_ORDER_ROLES = {
     "CL": {"producer", "services", "drilling"},
