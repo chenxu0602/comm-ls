@@ -64,6 +64,7 @@ from comm_ls.fundamentals import (
     build_commodity_confirmation_events_from_paths,
     build_fundamental_snapshot_from_paths,
 )
+from comm_ls.fundamental_exposure import audit_fundamental_exposure_registry_from_paths
 from comm_ls.mechanism_alignment import build_mechanism_alignment_audit_from_paths
 from comm_ls.mechanism_state import build_mechanism_state_model_from_paths
 from comm_ls.portfolio import (
@@ -823,6 +824,31 @@ def build_parser() -> argparse.ArgumentParser:
     candidate_taxonomy.add_argument("--output", type=Path, default=Path("data/processed/candidate_taxonomy_review.csv"))
     candidate_taxonomy.add_argument("--min-mechanism-alignment-probability", type=float, default=0.67)
     candidate_taxonomy.add_argument("--mechanism-review-band", type=float, default=0.55)
+
+    fundamental_exposure = subparsers.add_parser("audit-fundamental-exposure-registry")
+    fundamental_exposure.add_argument(
+        "--registry",
+        type=Path,
+        default=Path("config/fundamental_exposure_registry.csv"),
+    )
+    fundamental_exposure.add_argument("--as-of-date", required=True)
+    fundamental_exposure.add_argument(
+        "--output",
+        type=Path,
+        default=Path("data/processed/fundamental_exposure_registry_audit.csv"),
+    )
+    fundamental_exposure.add_argument(
+        "--active-output",
+        type=Path,
+        default=Path("data/processed/fundamental_exposure_registry_active.csv"),
+    )
+    fundamental_exposure.add_argument(
+        "--diagnostics-output",
+        type=Path,
+        default=Path(
+            "data/processed/fundamental_exposure_registry_peer_diagnostics.csv"
+        ),
+    )
 
     turnover = subparsers.add_parser("study-registry-turnover")
     turnover.add_argument("--registry", action="append", type=Path, default=None)
@@ -2990,6 +3016,22 @@ def main() -> None:
         print(
             f"Wrote {len(review):,} candidate taxonomy review rows to {args.output}; "
             f"taxonomy verdicts: {taxonomy_counts}; candidate gate verdicts: {gate_counts}"
+        )
+        return
+
+    if args.command == "audit-fundamental-exposure-registry":
+        registry, active, diagnostics = audit_fundamental_exposure_registry_from_paths(
+            registry_path=args.registry,
+            output_path=args.output,
+            active_output_path=args.active_output,
+            diagnostics_output_path=args.diagnostics_output,
+            as_of_date=args.as_of_date,
+        )
+        print(
+            f"Validated {len(registry):,} fundamental exposure rows; "
+            f"active as of {args.as_of_date}: {len(active):,}; "
+            f"peer groups: {diagnostics['structural_peer_group'].nunique():,}; "
+            f"wrote {args.output}, {args.active_output}, and {args.diagnostics_output}"
         )
         return
 

@@ -52,6 +52,10 @@ ACTIVE_CONTRACT_MONTHS_BY_SYMBOL = {
     # SI/HG concentrate liquidity in odd months, but November is thin and December is active.
     "SI": (1, 3, 5, 7, 9, 12),
     "HG": (1, 3, 5, 7, 9, 12),
+    # SGX 62% Fe CFR China iron ore futures list and trade every delivery
+    # month. Keep SCO explicit here so deferred-contract selection does not
+    # accidentally inherit the odd-month HG convention in cross-metal work.
+    "SCO": ALL_CONTRACT_MONTHS,
     # GFEX (Guangzhou Futures Exchange) — all 12 months trade.
     "LC": ALL_CONTRACT_MONTHS,
     "IS": ALL_CONTRACT_MONTHS,
@@ -69,6 +73,13 @@ NG_MIN_STRIP_MONTHS = 3
 # their native vendor units.
 LIVE_PRICE_SCALE_BY_SYMBOL = {"HG": 100.0}
 PRICE_SCALE_DISCONTINUITY_RATIO_BY_SYMBOL = {"HG": 20.0}
+
+# Default used by isolated tests and legacy data roots without an explicit
+# policy file. Production data roots should carry
+# ``contract_source_policy.csv`` so the operational cutover can be rolled
+# forward without changing Python code.
+DEFAULT_LIVE_CONTRACT_PREFERRED_START_DATE = pd.Timestamp("2026-07-31")
+CONTRACT_SOURCE_POLICY_FILENAME = "contract_source_policy.csv"
 
 
 def _validate_normalized_price_scale(
@@ -220,13 +231,59 @@ def _live_contract_market_data_path(symbol_dir: Path) -> Path:
     return symbol_dir.parent / "live_data" / f"{symbol_dir.name.upper()}.csv"
 
 
-def _prefer_historical_contract_rows(market: pd.DataFrame) -> pd.DataFrame:
+def _live_contract_preferred_start_date(symbol_dir: Path) -> pd.Timestamp:
+    policy_path = symbol_dir.parent / CONTRACT_SOURCE_POLICY_FILENAME
+    if not policy_path.exists():
+        return DEFAULT_LIVE_CONTRACT_PREFERRED_START_DATE
+
+    policy = pd.read_csv(policy_path, dtype={"symbol": "string"})
+    required = {"symbol", "live_preferred_start_date"}
+    missing = sorted(required.difference(policy.columns))
+    if missing:
+        raise ValueError(f"Missing contract source policy columns in {policy_path}: {missing}")
+
+    policy["symbol"] = policy["symbol"].astype("string").str.strip().str.upper()
+    symbol = symbol_dir.name.upper()
+    selected = policy.loc[policy["symbol"].eq(symbol)]
+    if selected.empty:
+        selected = policy.loc[policy["symbol"].eq("*")]
+    if len(selected) != 1:
+        raise ValueError(
+            f"Expected one contract source policy row for {symbol} or *, "
+            f"found {len(selected)} in {policy_path}"
+        )
+
+    cutover = pd.to_datetime(
+        selected.iloc[0]["live_preferred_start_date"], errors="coerce"
+    )
+    if pd.isna(cutover):
+        raise ValueError(f"Invalid live_preferred_start_date in {policy_path}")
+    return pd.Timestamp(cutover).normalize()
+
+
+def _prefer_contract_rows_by_cutover(
+    market: pd.DataFrame,
+    live_preferred_start_date: pd.Timestamp,
+) -> pd.DataFrame:
     if market.empty:
         return market
     out = market.copy()
     out["_settle_missing"] = pd.to_numeric(out["settle"], errors="coerce").isna()
-    out = out.sort_values(["date", "contract", "_settle_missing", "source_priority"])
-    return out.drop_duplicates(["date", "contract"], keep="first").drop(columns=["_settle_missing"])
+    post_cutover = pd.to_datetime(out["date"], errors="coerce").ge(
+        live_preferred_start_date
+    )
+    is_live = out["source_priority"].eq(1)
+    out["_cutover_priority"] = np.where(
+        post_cutover,
+        np.where(is_live, 0, 1),
+        np.where(is_live, 1, 0),
+    )
+    out = out.sort_values(
+        ["date", "contract", "_settle_missing", "_cutover_priority", "source_priority"]
+    )
+    return out.drop_duplicates(["date", "contract"], keep="first").drop(
+        columns=["_settle_missing", "_cutover_priority"]
+    )
 
 
 def _load_contract_market_data(symbol_dir: Path) -> pd.DataFrame:
@@ -250,7 +307,10 @@ def _load_contract_market_data(symbol_dir: Path) -> pd.DataFrame:
 
     if not frames:
         return pd.DataFrame(columns=["date", "contract", "settle", "volume", "open_interest"])
-    out = _prefer_historical_contract_rows(pd.concat(frames, ignore_index=True))
+    out = _prefer_contract_rows_by_cutover(
+        pd.concat(frames, ignore_index=True),
+        live_preferred_start_date=_live_contract_preferred_start_date(symbol_dir),
+    )
     _validate_normalized_price_scale(
         out,
         symbol=symbol_dir.name,
@@ -525,7 +585,10 @@ def _load_contract_settles(
 
     if not frames:
         return pd.DataFrame(columns=["date", contract_column, settle_column])
-    out = _prefer_historical_contract_rows(pd.concat(frames, ignore_index=True))
+    out = _prefer_contract_rows_by_cutover(
+        pd.concat(frames, ignore_index=True),
+        live_preferred_start_date=_live_contract_preferred_start_date(symbol_dir),
+    )
     out = out.rename(columns={"contract": contract_column, "settle": settle_column})
     return out[["date", contract_column, settle_column]]
 
@@ -941,6 +1004,10 @@ def add_calendar_contract_features(signals: pd.DataFrame, commodity_dir: Path) -
             ("M", 6, "jun"),
             ("U", 9, "sep"),
         ]:
+            # Each anchor adds a related batch of legacy and v2 columns.
+            # Consolidating between batches avoids crossing pandas' fragmented
+            # frame threshold while keeping the formulas below easy to audit.
+            g = g.copy()
             # Anchor contract: same-year if current month < anchor month,
             # otherwise next-year.  (Code matches CME month-letter convention.)
             anchor_year = np.where(
@@ -1062,6 +1129,10 @@ def add_calendar_contract_features(signals: pd.DataFrame, commodity_dir: Path) -
                 g[backwardation_v2]
             )
 
+        # The calendar-feature loop adds many columns above. Consolidate the
+        # frame once before the final activity-deferred block so pandas does
+        # not repeatedly extend an already fragmented BlockManager.
+        g = g.copy()
         activity_deferred_settles = _load_contract_settles(
             symbol_dir=commodity_dir / symbol,
             contracts=g["activity_deferred_contract"],
@@ -1073,34 +1144,51 @@ def add_calendar_contract_features(signals: pd.DataFrame, commodity_dir: Path) -
         else:
             g = g.merge(activity_deferred_settles, on=["date", "activity_deferred_contract"], how="left")
 
-        g["activity_deferred_log_ret_1d"] = _same_contract_log_return(
+        activity_deferred_log_ret_1d = _same_contract_log_return(
             g["activity_deferred_settle"],
             g["activity_deferred_contract"],
             periods=1,
         )
-        g["activity_deferred_log_ret_5d"] = _same_contract_log_return(
+        activity_deferred_log_ret_5d = _same_contract_log_return(
             g["activity_deferred_settle"],
             g["activity_deferred_contract"],
             periods=5,
         )
-        g["activity_deferred_log_ret_21d"] = _same_contract_log_return(
+        activity_deferred_log_ret_21d = _same_contract_log_return(
             g["activity_deferred_settle"],
             g["activity_deferred_contract"],
             periods=21,
         )
-        g["activity_deferred_annualized_carry"] = (
+        activity_deferred_annualized_carry = (
             _safe_log_ratio(g["activity_deferred_settle"], g["front_settle"])
             / _year_fraction_between_contracts(g["M0_con"], g["activity_deferred_contract"])
         )
-        g["activity_deferred_backwardation_steepness"] = -g["activity_deferred_annualized_carry"]
-        g["activity_deferred_annualized_carry_chg_21d"] = g["activity_deferred_annualized_carry"].diff(21)
-        g["activity_deferred_annualized_carry_z_252d"] = _rolling_z(g["activity_deferred_annualized_carry"])
-        g["activity_deferred_backwardation_steepness_chg_21d"] = (
-            g["activity_deferred_backwardation_steepness"].diff(21)
+        activity_deferred_backwardation_steepness = -activity_deferred_annualized_carry
+        activity_deferred_features = pd.DataFrame(
+            {
+                "activity_deferred_log_ret_1d": activity_deferred_log_ret_1d,
+                "activity_deferred_log_ret_5d": activity_deferred_log_ret_5d,
+                "activity_deferred_log_ret_21d": activity_deferred_log_ret_21d,
+                "activity_deferred_annualized_carry": activity_deferred_annualized_carry,
+                "activity_deferred_backwardation_steepness": (
+                    activity_deferred_backwardation_steepness
+                ),
+                "activity_deferred_annualized_carry_chg_21d": (
+                    activity_deferred_annualized_carry.diff(21)
+                ),
+                "activity_deferred_annualized_carry_z_252d": _rolling_z(
+                    activity_deferred_annualized_carry
+                ),
+                "activity_deferred_backwardation_steepness_chg_21d": (
+                    activity_deferred_backwardation_steepness.diff(21)
+                ),
+                "activity_deferred_backwardation_steepness_z_252d": _rolling_z(
+                    activity_deferred_backwardation_steepness
+                ),
+            },
+            index=g.index,
         )
-        g["activity_deferred_backwardation_steepness_z_252d"] = _rolling_z(
-            g["activity_deferred_backwardation_steepness"]
-        )
+        g = pd.concat([g, activity_deferred_features], axis=1)
         frames.append(g)
 
     if not frames:

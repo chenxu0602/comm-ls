@@ -226,6 +226,18 @@ METALS_COMPLEX_DISCOVERY_FEATURES = [
     "si_gc_liquid_deferred_carry_spread_same_contract_chg_21d",
     "hg_gc_matched_ratio_ma_gap_3d_50d_raw",
     "hg_gc_matched_ratio_ma_gap_3d_50d_chained",
+    "sco_hg_relative_log_price_index",
+    "sco_hg_relative_log_momentum_21d",
+    "sco_hg_relative_log_momentum_63d",
+    "sco_hg_relative_log_accel_21d_vs_63d",
+    "sco_hg_front_second_carry_spread",
+    "sco_hg_front_second_carry_spread_same_contract_chg_5d",
+    "sco_hg_front_third_carry_spread",
+    "sco_hg_front_third_carry_spread_same_contract_chg_5d",
+    "sco_hg_liquid_deferred_carry_spread",
+    "sco_hg_liquid_deferred_carry_spread_same_contract_chg_5d",
+    "sco_hg_matched_ratio_ma_gap_3d_50d_raw",
+    "sco_hg_matched_ratio_ma_gap_3d_50d_chained",
 ]
 DISCOVERY_FEATURE_PRESETS = {
     "priority": BROAD_DISCOVERY_FEATURES,
@@ -236,10 +248,12 @@ DISCOVERY_FEATURE_PRESETS = {
 FIRST_ORDER_ROLES = {
     "CL": {"producer", "services", "drilling"},
     "HG": {"producer", "diversified_miner"},
+    "SCO": {"iron_ore_miner", "diversified_miner"},
 }
 SECOND_ORDER_ROLES = {
     "CL": {"consumer", "refiner", "midstream", "shipping", "exporter", "energy_cost"},
     "HG": {"consumer", "industrial_metals_cycle"},
+    "SCO": {"steel_maker", "integrated_steel_iron_ore", "metals_service_center"},
 }
 
 

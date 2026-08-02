@@ -93,7 +93,7 @@ CL_V32_SLEEVE_CONFIG: dict[str, SleeveConfig] = {
         combined_share_rounding=True,
     ),
     "services": SleeveConfig(
-        weight=0.10,
+        weight=0.05,
         tickers=("FTI", "OII", "SLB", "HAL"),
         feature_symbol="CL",
         feature="carry_chg_21d",
@@ -150,7 +150,7 @@ CL_V32_SLEEVE_CONFIG: dict[str, SleeveConfig] = {
         signal_rule="chemical_inflection",
     ),
     "metals": SleeveConfig(
-        weight=0.10,
+        weight=0.05,
         tickers=("ATI", "CRS"),
         feature_symbol="CL",
         feature="next_dec_annualized_carry_gap_le_9m_v2",
