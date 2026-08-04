@@ -187,6 +187,29 @@ under `data/` and `config/`.
 
 ### 1. Build Commodity Features
 
+Rebuild a contract-aware carry file when raw or live contract data changes.
+Build into a review directory first; replacing an existing operational file
+requires `--overwrite`:
+
+```bash
+uv run comm-ls build-carry-data \
+  --symbol GC \
+  --commodity-dir data/comm \
+  --output-dir /tmp/comm-ls-carry-review
+```
+
+See [docs/carry_data_builder.md](docs/carry_data_builder.md) for source
+precedence, roll, maturity, anchor-chain and carry definitions.
+
+Compare a shadow build with the current operational files before promotion:
+
+```bash
+uv run comm-ls audit-carry-build \
+  --reference-dir data/comm/carry_data \
+  --candidate-dir data/comm/carry_data_shadow/CANDIDATE_NAME \
+  --output-dir data/audits/carry_build/CANDIDATE_NAME
+```
+
 ```bash
 uv run comm-ls build-commodity-signals \
   --input-dir data/comm/carry_data \

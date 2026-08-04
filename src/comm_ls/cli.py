@@ -15,6 +15,13 @@ from comm_ls.beta import (
     configured_hedge_tickers,
 )
 from comm_ls.candidates import build_candidate_signals_from_paths
+from comm_ls.carry_audit import audit_carry_directories
+from comm_ls.carry_builder import (
+    CARRY_OUTPUT_SYMBOL_BY_SOURCE,
+    CarryBuildConfig,
+    build_carry_frame,
+    write_carry_frame,
+)
 from comm_ls.commodity import build_commodity_signal_frame, load_carry_directory, write_frame
 from comm_ls.commodity_research import research_commodity_features_from_paths
 from comm_ls.cross_product_summary import (
@@ -138,6 +145,40 @@ DEFAULT_EXCLUDED_BROAD_UNIVERSE_TICKERS = [
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="comm-ls")
     subparsers = parser.add_subparsers(dest="command", required=True)
+
+    carry_data = subparsers.add_parser("build-carry-data")
+    carry_data.add_argument("--commodity-dir", type=Path, default=Path("data/comm"))
+    carry_data.add_argument("--output-dir", type=Path, default=Path("data/comm/carry_data"))
+    carry_data.add_argument(
+        "--symbol",
+        action="append",
+        default=None,
+        help="Contract symbol to build; repeat for multiple symbols. Default discovers all symbol directories.",
+    )
+    carry_data.add_argument("--volume-staleness-sessions", type=int, default=2)
+    carry_data.add_argument("--oi-staleness-sessions", type=int, default=5)
+    carry_data.add_argument("--roll-confirmation-observations", type=int, default=2)
+    carry_data.add_argument("--lis-ratio", type=float, default=0.60)
+    carry_data.add_argument("--activity-threshold", type=float, default=0.005)
+    carry_data.add_argument("--arrival-hour-utc", type=int, default=8)
+    carry_data.add_argument(
+        "--overwrite",
+        action="store_true",
+        help="Allow replacement of existing carry CSVs. Without this flag the command fails closed.",
+    )
+
+    carry_audit = subparsers.add_parser("audit-carry-build")
+    carry_audit.add_argument(
+        "--reference-dir", type=Path, default=Path("data/comm/carry_data")
+    )
+    carry_audit.add_argument("--candidate-dir", type=Path, required=True)
+    carry_audit.add_argument("--output-dir", type=Path, required=True)
+    carry_audit.add_argument("--symbol", action="append", default=None)
+    carry_audit.add_argument(
+        "--overwrite",
+        action="store_true",
+        help="Allow replacement of files in the audit output directory only.",
+    )
 
     commodity = subparsers.add_parser("build-commodity-signals")
     commodity.add_argument("--input-dir", type=Path, default=Path("data/comm/carry_data"))
@@ -2041,6 +2082,75 @@ def main() -> None:
         )
         if summary["error_count"]:
             raise SystemExit(1)
+        return
+
+    if args.command == "build-carry-data":
+        if args.symbol:
+            symbols = sorted({str(symbol).upper().strip() for symbol in args.symbol})
+        else:
+            symbols = sorted(
+                path.name.upper()
+                for path in args.commodity_dir.iterdir()
+                if path.is_dir()
+                and path.name not in {"carry_data", "live_data", "LME"}
+                and any(path.glob("*.csv"))
+            )
+        if not symbols:
+            parser.error(f"No contract symbol directories found under {args.commodity_dir}")
+
+        output_paths = {
+            symbol: args.output_dir
+            / f"{CARRY_OUTPUT_SYMBOL_BY_SOURCE.get(symbol, symbol)}.csv"
+            for symbol in symbols
+        }
+        existing = [path for path in output_paths.values() if path.exists()]
+        if existing and not args.overwrite:
+            formatted = ", ".join(str(path) for path in existing)
+            parser.error(
+                "Refusing to replace existing carry files without --overwrite: " + formatted
+            )
+
+        for symbol in symbols:
+            print(f"Building {symbol} contract panel and carry chains ...")
+            config = CarryBuildConfig(
+                symbol=symbol,
+                commodity_dir=args.commodity_dir,
+                volume_staleness_sessions=args.volume_staleness_sessions,
+                oi_staleness_sessions=args.oi_staleness_sessions,
+                roll_confirmation_observations=args.roll_confirmation_observations,
+                lis_ratio=args.lis_ratio,
+                activity_threshold=args.activity_threshold,
+                arrival_hour_utc=args.arrival_hour_utc,
+            )
+            frame = build_carry_frame(config)
+            output_path = write_carry_frame(
+                frame,
+                output_paths[symbol],
+                overwrite=args.overwrite,
+            )
+            start = frame["date"].min().date()
+            end = frame["date"].max().date()
+            print(
+                f"  wrote {len(frame):,} rows and {len(frame.columns):,} columns "
+                f"({start} -> {end}) to {output_path}"
+            )
+        return
+
+    if args.command == "audit-carry-build":
+        summary = audit_carry_directories(
+            reference_dir=args.reference_dir,
+            candidate_dir=args.candidate_dir,
+            output_dir=args.output_dir,
+            symbols=args.symbol,
+            overwrite=args.overwrite,
+        )
+        print(
+            f"Audited {summary['symbols']:,} symbols: "
+            f"compared={summary['compared']:,}, "
+            f"candidate_missing={summary['candidate_missing']:,}, "
+            f"reference_missing={summary['reference_missing']:,}. "
+            f"Wrote reports to {args.output_dir}"
+        )
         return
 
     if args.command == "build-commodity-signals":

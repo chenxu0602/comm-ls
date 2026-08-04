@@ -25,3 +25,22 @@ documented exceptional risk may still receive a manual `flatten` decision.
 The earlier 2026-08-03 target package with WLK flattened is superseded after
 regeneration with `--overwrite`. Its orders and aggregate hedge quantities
 must not be mixed with the regenerated package.
+
+## Position-level fill reconciliation
+
+The final IB holdings snapshot matched all displayed integer targets in
+`report.md`. The submitted trades reconciled to final positions as follows:
+
+- LYB -12, EMN -6 and HUN -43;
+- WLK -11 after selling one additional share;
+- TNK 7 after buying three shares;
+- STNG 2 after buying one share;
+- XLE 83 after buying 22 shares; and
+- SPY no longer displayed after buying two shares to close the prior short.
+
+The remaining displayed positions, including ERO 17, TECK 7 and XME -10, also
+matched the target package. This confirms fills at the position level only.
+The holdings view does not provide reliable trade-level execution prices for
+pre-existing positions because IB average price blends old and new lots. Use an
+IB executions or activity statement before recording `actual_ib` slippage,
+commissions or VWAP execution quality.

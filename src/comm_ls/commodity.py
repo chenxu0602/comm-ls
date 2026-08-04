@@ -52,6 +52,8 @@ ACTIVE_CONTRACT_MONTHS_BY_SYMBOL = {
     # SI/HG concentrate liquidity in odd months, but November is thin and December is active.
     "SI": (1, 3, 5, 7, 9, 12),
     "HG": (1, 3, 5, 7, 9, 12),
+    "PA": (3, 6, 9, 12),
+    "PL": (1, 4, 7, 10),
     # SGX 62% Fe CFR China iron ore futures list and trade every delivery
     # month. Keep SCO explicit here so deferred-contract selection does not
     # accidentally inherit the odd-month HG convention in cross-metal work.
@@ -168,6 +170,17 @@ def _next_contract_for_month(front_contract: pd.Series, month: int) -> pd.Series
     year = front_month.dt.year + front_month.dt.month.ge(month).astype("Int64")
     contract = year.astype("Int64").astype("string") + FUTURES_MONTH_NUMBERS[month]
     return contract.where(front_month.notna()).astype("string")
+
+
+def _offset_contract_months(contract: pd.Series, months: int) -> pd.Series:
+    """Shift a monthly futures contract by an exact number of calendar months."""
+    if months < 0:
+        raise ValueError("Contract month offset must be non-negative")
+    contract_month = _contract_month_start(contract)
+    shifted = contract_month + pd.DateOffset(months=months)
+    code = shifted.dt.month.map(FUTURES_MONTH_NUMBERS)
+    result = shifted.dt.year.astype("Int64").astype("string") + code.astype("string")
+    return result.where(contract_month.notna()).astype("string")
 
 
 def _liquid_deferred_contract(
@@ -487,7 +500,7 @@ def _front_price_low_regime_features(
 
 
 def load_carry_file(path: Path) -> pd.DataFrame:
-    df = pd.read_csv(path)
+    df = pd.read_csv(path, low_memory=False)
     missing = REQUIRED_CARRY_COLUMNS.difference(df.columns)
     if missing:
         raise ValueError(f"{path} is missing required columns: {sorted(missing)}")
@@ -498,12 +511,49 @@ def load_carry_file(path: Path) -> pd.DataFrame:
     df["arrival"] = pd.to_datetime(df["arrival"], utc=False)
     df = df.sort_values("date").reset_index(drop=True)
 
-    text_cols = {"symbol", "date", "arrival", "M0_con", "M1_con", "M2_con"}
+    contract_cols = {
+        col
+        for col in df.columns
+        if col.endswith("_con") or col.endswith("_contract")
+    }
+    source_cols = {col for col in df.columns if col.endswith("_source")}
+    date_cols = {
+        col
+        for col in df.columns
+        if col.endswith("_asof_date") or col.endswith("_maturity")
+    }
+    boolean_cols = {col for col in df.columns if col.endswith("_is_estimated")}
+    diagnostic_text_cols = {
+        "settle_kind",
+        "lis_curve_contracts",
+        "lis_curve_direction",
+        "lis_activity_field",
+    }
+    diagnostic_text_cols.update(col for col in df.columns if col.endswith("_settle_kind"))
+    text_cols = {
+        "symbol",
+        "date",
+        "arrival",
+        *contract_cols,
+        *source_cols,
+        *date_cols,
+        *boolean_cols,
+        *diagnostic_text_cols,
+    }
     numeric_cols = [col for col in df.columns if col not in text_cols]
     df[numeric_cols] = df[numeric_cols].apply(pd.to_numeric, errors="coerce")
-    for col in ["M0_con", "M1_con", "M2_con"]:
-        if col in df.columns:
-            df[col] = df[col].astype("string").str.strip().str.upper()
+    for col in contract_cols:
+        df[col] = df[col].astype("string").str.strip().str.upper()
+    for col in date_cols:
+        df[col] = pd.to_datetime(df[col], errors="coerce", utc=False)
+    for col in boolean_cols:
+        df[col] = (
+            df[col]
+            .astype("string")
+            .str.lower()
+            .map({"true": True, "false": False})
+            .astype("boolean")
+        )
     scale = LIVE_PRICE_SCALE_BY_SYMBOL.get(path.stem.upper())
     if scale is not None:
         settle_columns = [column for column in ("M0_settle", "M1_settle", "M2_settle") if column in df]
@@ -1200,6 +1250,265 @@ def add_calendar_december_carry_features(signals: pd.DataFrame, commodity_dir: P
     return add_calendar_contract_features(signals=signals, commodity_dir=commodity_dir)
 
 
+def add_brent_led_synchronized_carry_features(
+    signals: pd.DataFrame,
+    commodity_dir: Path,
+    base_symbol: str = "CL",
+    brent_symbol: str = "CO",
+) -> pd.DataFrame:
+    """Build delivery-aligned Brent-minus-WTI curve slopes.
+
+    Brent supplies the point-in-time M0 roll clock. WTI is forced onto the
+    same named delivery month, and M1/M2 are the next one/two calendar months
+    for both products. The common delivery-month gap is the annualization
+    denominator, so the feature cannot compare different calendar windows
+    merely because Brent expires earlier than WTI.
+    """
+    out = signals.copy()
+    if out.empty or not {"date", "symbol", "M0_con"}.issubset(out.columns):
+        return out
+
+    base_symbol = base_symbol.upper().strip()
+    brent_symbol = brent_symbol.upper().strip()
+    normalized_symbol = out["symbol"].astype(str).str.upper().str.strip()
+    available = set(normalized_symbol)
+    if base_symbol not in available or brent_symbol not in available:
+        return out
+
+    brent_clock = out.loc[
+        normalized_symbol.eq(brent_symbol), ["date", "M0_con"]
+    ].copy()
+    brent_clock["date"] = pd.to_datetime(brent_clock["date"], utc=False).dt.normalize()
+    brent_clock = (
+        brent_clock.sort_values("date")
+        .drop_duplicates("date", keep="last")
+        .reset_index(drop=True)
+    )
+    brent_clock = brent_clock.rename(columns={"M0_con": "brent_led_m0_con"})
+    brent_clock["brent_led_m0_con"] = (
+        brent_clock["brent_led_m0_con"].astype("string").str.upper().str.strip()
+    )
+    brent_clock["brent_led_m1_con"] = _offset_contract_months(
+        brent_clock["brent_led_m0_con"], 1
+    )
+    brent_clock["brent_led_m2_con"] = _offset_contract_months(
+        brent_clock["brent_led_m0_con"], 2
+    )
+
+    # Import locally because carry_builder imports this module's contract
+    # conventions. At runtime commodity.py is fully initialized, avoiding a
+    # module-import cycle while retaining the builder's history-first merge.
+    from comm_ls.carry_builder import CarryBuildConfig, load_contract_panel
+
+    panels = {
+        "wti": load_contract_panel(
+            CarryBuildConfig(symbol=base_symbol, commodity_dir=commodity_dir)
+        ),
+        "brent": load_contract_panel(
+            CarryBuildConfig(symbol=brent_symbol, commodity_dir=commodity_dir)
+        ),
+    }
+    features = brent_clock.copy()
+    for market, panel in panels.items():
+        lookup = (
+            panel[["date", "contract", "settle"]]
+            .copy()
+            .sort_values(["date", "contract"])
+            .drop_duplicates(["date", "contract"], keep="last")
+        )
+        lookup["date"] = pd.to_datetime(lookup["date"], utc=False).dt.normalize()
+        for leg in range(3):
+            contract_col = f"brent_led_m{leg}_con"
+            settle_col = f"brent_led_{market}_m{leg}_settle"
+            selected = features[["date", contract_col]].rename(
+                columns={contract_col: "contract"}
+            )
+            selected = selected.merge(lookup, on=["date", "contract"], how="left")
+            features[settle_col] = pd.to_numeric(selected["settle"], errors="coerce")
+
+    spread_specs = {
+        "front_second": ("brent_led_m1_con", 1),
+        "front_third": ("brent_led_m2_con", 2),
+    }
+    for label, (far_contract_col, far_leg) in spread_specs.items():
+        common_year_fraction = _year_fraction_between_contracts(
+            features["brent_led_m0_con"], features[far_contract_col]
+        )
+        wti_carry_col = f"brent_led_{label}_wti_carry"
+        brent_carry_col = f"brent_led_{label}_brent_carry"
+        spread_col = f"brent_led_{label}_carry_spread"
+        features[wti_carry_col] = _safe_log_ratio(
+            features[f"brent_led_wti_m{far_leg}_settle"],
+            features["brent_led_wti_m0_settle"],
+        ) / common_year_fraction
+        features[brent_carry_col] = _safe_log_ratio(
+            features[f"brent_led_brent_m{far_leg}_settle"],
+            features["brent_led_brent_m0_settle"],
+        ) / common_year_fraction
+        features[spread_col] = features[brent_carry_col] - features[wti_carry_col]
+        features[f"{spread_col}_chg_21d"] = features[spread_col].diff(21)
+        features[f"{spread_col}_z_252d"] = _rolling_z(features[spread_col])
+
+    # Build a gradual roll from the nearest two unexpired Brent contracts.
+    # The Brent activity share is applied to complete, delivery-aligned curve
+    # slopes for both markets. This is deliberately different from blending
+    # Brent and WTI front contracts independently, which would reintroduce the
+    # cross-market roll mismatch this feature is intended to remove.
+    brent_panel = panels["brent"].copy()
+    brent_panel = brent_panel.loc[
+        brent_panel["settle"].notna() & brent_panel["tm"].gt(0)
+    ].copy()
+    brent_panel["date"] = pd.to_datetime(
+        brent_panel["date"], utc=False
+    ).dt.normalize()
+    brent_panel = brent_panel.sort_values(["date", "contract_month", "contract"])
+
+    roll_rows: list[dict[str, object]] = []
+    for date, day in brent_panel.groupby("date", sort=True):
+        nearest = day.drop_duplicates("contract", keep="last").head(2)
+        if nearest.empty:
+            continue
+        old = nearest.iloc[0]
+        new = nearest.iloc[1] if len(nearest) > 1 else None
+        activity_field = "single_contract"
+        new_weight = 0.0
+        if new is not None:
+            old_oi = pd.to_numeric(old.get("open_interest"), errors="coerce")
+            new_oi = pd.to_numeric(new.get("open_interest"), errors="coerce")
+            old_volume = pd.to_numeric(old.get("volume"), errors="coerce")
+            new_volume = pd.to_numeric(new.get("volume"), errors="coerce")
+            if pd.notna(old_oi) and pd.notna(new_oi) and old_oi + new_oi > 0:
+                activity_field = "open_interest"
+                new_weight = float(new_oi / (old_oi + new_oi))
+            elif (
+                pd.notna(old_volume)
+                and pd.notna(new_volume)
+                and old_volume + new_volume > 0
+            ):
+                activity_field = "volume"
+                new_weight = float(new_volume / (old_volume + new_volume))
+            else:
+                # No activity evidence means no justified proportional roll.
+                # Keep the nearest valid contract rather than importing a
+                # future observation or silently assigning an arbitrary mix.
+                activity_field = "nearest_fallback"
+        roll_rows.append(
+            {
+                "date": date,
+                "brent_led_roll_old_con": str(old["contract"]),
+                "brent_led_roll_new_con": (
+                    str(new["contract"]) if new is not None else pd.NA
+                ),
+                "brent_led_roll_new_weight": new_weight,
+                "brent_led_roll_activity_field": activity_field,
+            }
+        )
+
+    roll = pd.DataFrame(roll_rows)
+    if not roll.empty:
+        raw_roll_weight = pd.to_numeric(
+            roll["brent_led_roll_new_weight"], errors="coerce"
+        )
+        roll["brent_led_roll_transition_weight"] = (
+            (raw_roll_weight - 0.40) / 0.20
+        ).clip(lower=0.0, upper=1.0)
+        for anchor_name, contract_column in (
+            ("old", "brent_led_roll_old_con"),
+            ("new", "brent_led_roll_new_con"),
+        ):
+            for far_leg in (1, 2):
+                far_contract_column = (
+                    f"brent_led_roll_{anchor_name}_m{far_leg}_con"
+                )
+                roll[far_contract_column] = _offset_contract_months(
+                    roll[contract_column], far_leg
+                )
+
+            for market, panel in panels.items():
+                lookup = (
+                    panel[["date", "contract", "settle"]]
+                    .copy()
+                    .sort_values(["date", "contract"])
+                    .drop_duplicates(["date", "contract"], keep="last")
+                )
+                lookup["date"] = pd.to_datetime(
+                    lookup["date"], utc=False
+                ).dt.normalize()
+                for leg, selected_contract_column in (
+                    (0, contract_column),
+                    (1, f"brent_led_roll_{anchor_name}_m1_con"),
+                    (2, f"brent_led_roll_{anchor_name}_m2_con"),
+                ):
+                    selected = roll[["date", selected_contract_column]].rename(
+                        columns={selected_contract_column: "contract"}
+                    )
+                    selected = selected.merge(
+                        lookup, on=["date", "contract"], how="left"
+                    )
+                    roll[
+                        f"brent_led_roll_{anchor_name}_{market}_m{leg}_settle"
+                    ] = pd.to_numeric(selected["settle"], errors="coerce")
+
+            for label, far_leg in (("front_second", 1), ("front_third", 2)):
+                year_fraction = _year_fraction_between_contracts(
+                    roll[contract_column],
+                    roll[f"brent_led_roll_{anchor_name}_m{far_leg}_con"],
+                )
+                wti_carry = _safe_log_ratio(
+                    roll[
+                        f"brent_led_roll_{anchor_name}_wti_m{far_leg}_settle"
+                    ],
+                    roll[f"brent_led_roll_{anchor_name}_wti_m0_settle"],
+                ) / year_fraction
+                brent_carry = _safe_log_ratio(
+                    roll[
+                        f"brent_led_roll_{anchor_name}_brent_m{far_leg}_settle"
+                    ],
+                    roll[f"brent_led_roll_{anchor_name}_brent_m0_settle"],
+                ) / year_fraction
+                roll[
+                    f"brent_led_roll_{anchor_name}_{label}_carry_spread"
+                ] = brent_carry - wti_carry
+
+        blend_weights = {
+            "oi_blended": raw_roll_weight,
+            "oi_transition_blended": roll[
+                "brent_led_roll_transition_weight"
+            ],
+        }
+        for label in ("front_second", "front_third"):
+            old_spread = roll[
+                f"brent_led_roll_old_{label}_carry_spread"
+            ]
+            new_spread = roll[
+                f"brent_led_roll_new_{label}_carry_spread"
+            ]
+            for blend_name, blend_weight in blend_weights.items():
+                spread_col = f"brent_led_{blend_name}_{label}_carry_spread"
+                blended = (
+                    (1.0 - blend_weight) * old_spread
+                    + blend_weight * new_spread
+                )
+                # A one-contract row or an activity-less nearest fallback has
+                # a zero new weight and therefore only requires the old curve.
+                roll[spread_col] = blended.where(
+                    blend_weight.ne(0.0), old_spread
+                )
+                roll[f"{spread_col}_chg_21d"] = roll[spread_col].diff(21)
+                roll[f"{spread_col}_z_252d"] = _rolling_z(roll[spread_col])
+
+        features = features.merge(roll, on="date", how="left")
+
+    feature_cols = [column for column in features.columns if column != "date"]
+    out["date"] = pd.to_datetime(out["date"], utc=False).dt.normalize()
+    out = out.drop(columns=[column for column in feature_cols if column in out.columns])
+    out = out.merge(features, on="date", how="left")
+    non_base = out["symbol"].astype(str).str.upper().str.strip().ne(base_symbol)
+    for column in feature_cols:
+        out.loc[non_base, column] = pd.NA if column.endswith("_con") else np.nan
+    return out
+
+
 def add_brent_wti_spread_features(
     signals: pd.DataFrame,
     base_symbol: str = "CL",
@@ -1432,6 +1741,20 @@ def build_commodity_signal_frame(
             }
         )
 
+        # Richer carry files may contain exact-maturity traditional slopes,
+        # multi-tenor LIS slopes, and jointly selected calendar-pair slopes.
+        # Preserve their raw levels in the signal panel; the downstream
+        # reaction engine applies timestamp-safe standardization as needed.
+        passthrough_curve_columns = [
+            column
+            for column in g.columns
+            if column.startswith(("lis_carry_", "chain_"))
+            or (column.startswith("calendar_") and column.endswith("_annualized_carry"))
+        ]
+        for column in passthrough_curve_columns:
+            if column not in out.columns:
+                out[column] = pd.to_numeric(g[column], errors="coerce")
+
         out["front_second_spread_chg_21d"] = out["front_second_spread"].diff(21)
         out["front_third_spread_chg_21d"] = out["front_third_spread"].diff(21)
         out["front_second_annualized_carry_chg_21d"] = out["front_second_annualized_carry"].diff(21)
@@ -1481,6 +1804,10 @@ def build_commodity_signal_frame(
     if commodity_dir is not None:
         signals = add_calendar_contract_features(signals, commodity_dir=commodity_dir)
         signals = add_ng_seasonal_features(signals, commodity_dir=commodity_dir)
+        signals = add_brent_led_synchronized_carry_features(
+            signals,
+            commodity_dir=commodity_dir,
+        )
     if include_brent_wti_features:
         signals = add_brent_wti_spread_features(signals)
     return signals.sort_values(["date", "symbol"]).reset_index(drop=True)
