@@ -117,6 +117,12 @@ from comm_ls.macro import build_macro_regime_frame_from_paths
 from comm_ls.year_stability import build_year_stability_audit_from_paths
 from comm_ls.shortability import build_shortability_from_price_directory
 from comm_ls.sensitivity import build_daily_scores_from_paths, build_stock_sensitivity_registry_from_paths
+from comm_ls.shipping_confirmation import (
+    DEFAULT_CORRELATION_WINDOW,
+    DEFAULT_REGIME_WINDOW,
+    build_shipping_confirmation_events_from_paths,
+    summarize_shipping_confirmation,
+)
 from comm_ls.state_summary import summarize_state_role_clusters_from_paths
 from comm_ls.universe import (
     build_broad_quarterly_liquidity_universe,
@@ -158,6 +164,19 @@ def build_parser() -> argparse.ArgumentParser:
     carry_data.add_argument("--volume-staleness-sessions", type=int, default=2)
     carry_data.add_argument("--oi-staleness-sessions", type=int, default=5)
     carry_data.add_argument("--roll-confirmation-observations", type=int, default=2)
+    carry_data.add_argument(
+        "--roll-policy",
+        choices=("confirmed", "adaptive-fast"),
+        default="confirmed",
+        help=(
+            "Front-contract roll policy. adaptive-fast accepts one fresh, strongly "
+            "corroborated next-contract lead inside the expected roll window."
+        ),
+    )
+    carry_data.add_argument("--fast-roll-fallback-window-days", type=int, default=20)
+    carry_data.add_argument("--fast-roll-min-history", type=int, default=12)
+    carry_data.add_argument("--fast-roll-mad-multiplier", type=float, default=2.0)
+    carry_data.add_argument("--fast-roll-min-activity-ratio", type=float, default=1.25)
     carry_data.add_argument("--lis-ratio", type=float, default=0.60)
     carry_data.add_argument("--activity-threshold", type=float, default=0.005)
     carry_data.add_argument("--arrival-hour-utc", type=int, default=8)
@@ -1182,6 +1201,37 @@ def build_parser() -> argparse.ArgumentParser:
     commodity_confirmation.add_argument("--eia-tradable-lag-days", type=int, default=1)
     commodity_confirmation.add_argument("--cftc-tradable-lag-days", type=int, default=3)
 
+    shipping_confirmation = subparsers.add_parser("build-shipping-confirmation-events")
+    shipping_confirmation.add_argument("--commodity", default="CL")
+    shipping_confirmation.add_argument(
+        "--carry-data", type=Path, default=Path("data/comm/carry_data/CL.csv")
+    )
+    shipping_confirmation.add_argument(
+        "--shipping-data", type=Path, default=None,
+        help="External shipping data CSV with date,value columns (Clarksons VLCC TCE or BDTI)."
+    )
+    shipping_confirmation.add_argument(
+        "--equity-dir", type=Path, default=Path("data/equity/yfinance")
+    )
+    shipping_confirmation.add_argument(
+        "--output", type=Path, default=Path("data/processed/shipping_confirmation_events.csv")
+    )
+    shipping_confirmation.add_argument(
+        "--correlation-window", type=int, default=DEFAULT_CORRELATION_WINDOW
+    )
+    shipping_confirmation.add_argument(
+        "--regime-window", type=int, default=DEFAULT_REGIME_WINDOW
+    )
+
+    shipping_analyze = subparsers.add_parser("analyze-shipping-channel")
+    shipping_analyze.add_argument(
+        "--events", type=Path, default=Path("data/processed/shipping_confirmation_events.csv")
+    )
+    shipping_analyze.add_argument(
+        "--lookback-months", type=int, default=12
+    )
+
+
     eia_catalog = subparsers.add_parser(
         "catalog-eia-routes",
         help="Build a metadata-only EIA API v2 route catalog without downloading observations.",
@@ -2092,7 +2142,8 @@ def main() -> None:
                 path.name.upper()
                 for path in args.commodity_dir.iterdir()
                 if path.is_dir()
-                and path.name not in {"carry_data", "live_data", "LME"}
+                and not path.name.lower().startswith("carry_data")
+                and path.name not in {"live_data", "LME"}
                 and any(path.glob("*.csv"))
             )
         if not symbols:
@@ -2118,6 +2169,11 @@ def main() -> None:
                 volume_staleness_sessions=args.volume_staleness_sessions,
                 oi_staleness_sessions=args.oi_staleness_sessions,
                 roll_confirmation_observations=args.roll_confirmation_observations,
+                roll_policy=args.roll_policy,
+                fast_roll_fallback_window_days=args.fast_roll_fallback_window_days,
+                fast_roll_min_history=args.fast_roll_min_history,
+                fast_roll_mad_multiplier=args.fast_roll_mad_multiplier,
+                fast_roll_min_activity_ratio=args.fast_roll_min_activity_ratio,
                 lis_ratio=args.lis_ratio,
                 activity_threshold=args.activity_threshold,
                 arrival_hour_utc=args.arrival_hour_utc,
@@ -3386,6 +3442,54 @@ def main() -> None:
         counts = events["source_type"].value_counts().to_dict() if "source_type" in events else {}
         print(f"Wrote {len(events):,} commodity confirmation rows to {args.output}; sources: {counts}")
         return
+
+    if args.command == "build-shipping-confirmation-events":
+        if args.shipping_data is not None:
+            print(
+                f"Building shipping confirmation events from "
+                f"{args.carry_data} and {args.shipping_data} ..."
+            )
+        else:
+            print(
+                f"Building shipping confirmation events from "
+                f"{args.carry_data} and shipping stock proxy ({args.equity_dir}) ..."
+            )
+            print(
+                "  NOTE: using shipping stock composite as proxy. "
+                "Replace with Clarksons/BDTI data via --shipping-data for production."
+            )
+        events = build_shipping_confirmation_events_from_paths(
+            carry_data_path=args.carry_data,
+            shipping_data_path=args.shipping_data,
+            equity_prices_dir=args.equity_dir,
+            output_path=args.output,
+            commodity=args.commodity,
+            correlation_window=args.correlation_window,
+            regime_window=args.regime_window,
+        )
+        summary = summarize_shipping_confirmation(events)
+        print(
+            f"Wrote {len(events):,} shipping confirmation rows to {args.output}"
+        )
+        if "error" not in summary:
+            print(
+                f"  latest: {summary["latest_date"]} | corr={summary["latest_correlation"]:.3f} "
+                f"regime_z={summary["latest_regime_z"]:.3f} flag={summary["latest_flag"]}"
+            )
+        else:
+            print(f"  WARNING: {summary["error"]}")
+        return
+
+    if args.command == "analyze-shipping-channel":
+        events = __import__("pandas").read_csv(args.events)
+        summary = summarize_shipping_confirmation(events, lookback_months=args.lookback_months)
+        for key, value in summary.items():
+            if key == "flag_counts":
+                print(f"  flag_counts: {value}")
+            else:
+                print(f"  {key}: {value}")
+        return
+
 
     if args.command == "research-commodity-features":
         commodity_code = args.commodity.upper().strip()

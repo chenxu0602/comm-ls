@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import csv
 from pathlib import Path
 
 import numpy as np
@@ -129,6 +130,51 @@ def _validate_normalized_price_scale(
         )
 
 
+def _read_contract_csv(
+    path: Path,
+    *,
+    usecols: list[str] | None = None,
+) -> pd.DataFrame:
+    """Read a contract CSV after rejecting shifted, short, or wide rows."""
+    with path.open(newline="") as handle:
+        reader = csv.reader(handle)
+        try:
+            header = next(reader)
+        except StopIteration:
+            return pd.DataFrame()
+        malformed = [
+            (line_number, len(row))
+            for line_number, row in enumerate(reader, start=2)
+            if len(row) != len(header)
+        ]
+    if malformed:
+        preview = ", ".join(
+            f"line {line_number}: {width} fields"
+            for line_number, width in malformed[:5]
+        )
+        raise ValueError(
+            f"Malformed contract CSV {path}: expected {len(header)} fields; {preview}"
+        )
+    return pd.read_csv(path, usecols=usecols, low_memory=False)
+
+
+def _validate_live_contract_dates(frame: pd.DataFrame) -> None:
+    """Reject live rows whose labelled delivery month is already in the past."""
+    if frame.empty:
+        return
+    contract_month = _contract_month_start(frame["contract"])
+    observation_month = pd.to_datetime(frame["date"], errors="coerce").dt.to_period(
+        "M"
+    ).dt.to_timestamp()
+    invalid = contract_month.lt(observation_month)
+    if invalid.any():
+        sample = frame.loc[invalid, ["date", "contract"]].head(5).to_dict("records")
+        raise ValueError(
+            "Live contract labels contain an already-past delivery month; "
+            f"check the contract year: {sample}"
+        )
+
+
 def _rolling_z(value: pd.Series, window: int = 252, min_periods: int = 63) -> pd.Series:
     mean = value.rolling(window, min_periods=min_periods).mean()
     std = value.rolling(window, min_periods=min_periods).std()
@@ -237,7 +283,68 @@ def _normalize_contract_market_data(
     out["volume"] = pd.to_numeric(out["volume"], errors="coerce") if "volume" in out.columns else np.nan
     out["open_interest"] = pd.to_numeric(out["open int"], errors="coerce") if "open int" in out.columns else np.nan
     out["source_priority"] = source_priority
-    return out[["date", "contract", "settle", "volume", "open_interest", "source_priority"]]
+    if source_priority == 1:
+        _validate_live_contract_dates(out)
+    return _resolve_contract_duplicates(
+        out[["date", "contract", "settle", "volume", "open_interest", "source_priority"]]
+    )
+
+
+def _resolve_contract_duplicates(frame: pd.DataFrame) -> pd.DataFrame:
+    """Resolve duplicate source rows without depending on CSV row order.
+
+    Live snapshots occasionally contain the same ``(date, contract)`` more
+    than once.  The row with the strongest observed activity is the most
+    reliable representation of that contract; using ``keep='last'`` can let a
+    thin, mislabelled deferred contract overwrite the active contract.
+    """
+    keys = ["date", "contract"]
+    if frame.empty or not frame.duplicated(keys, keep=False).any():
+        return frame.reset_index(drop=True)
+
+    out = frame.copy()
+    out["_row_order"] = np.arange(len(out))
+    settle = pd.to_numeric(out.get("settle"), errors="coerce")
+    volume = pd.to_numeric(out.get("volume"), errors="coerce")
+    open_interest = pd.to_numeric(out.get("open_interest"), errors="coerce")
+    out["_settle_missing"] = settle.isna()
+    out["_volume_missing"] = volume.isna()
+    out["_volume_rank"] = volume.fillna(-np.inf)
+    out["_oi_missing"] = open_interest.isna()
+    out["_oi_rank"] = open_interest.fillna(-np.inf)
+    value_columns = [
+        column
+        for column in ("settle", "open", "high", "low", "volume", "open_interest")
+        if column in out.columns
+    ]
+    out["_completeness"] = out[value_columns].notna().sum(axis=1)
+    if "settle_kind" in out.columns:
+        out["_nonofficial_settle"] = ~out["settle_kind"].isin(
+            {"settlement", "settlement_scaled"}
+        )
+    else:
+        out["_nonofficial_settle"] = False
+
+    out = out.sort_values(
+        keys
+        + [
+            "_settle_missing",
+            "_nonofficial_settle",
+            "_volume_missing",
+            "_volume_rank",
+            "_oi_missing",
+            "_oi_rank",
+            "_completeness",
+            "_row_order",
+        ],
+        ascending=[True, True, True, True, True, False, True, False, False, False],
+    )
+    helper_columns = [column for column in out.columns if column.startswith("_")]
+    return (
+        out.drop_duplicates(keys, keep="first")
+        .drop(columns=helper_columns)
+        .reset_index(drop=True)
+    )
 
 
 def _live_contract_market_data_path(symbol_dir: Path) -> Path:
@@ -303,7 +410,7 @@ def _load_contract_market_data(symbol_dir: Path) -> pd.DataFrame:
     frames: list[pd.DataFrame] = []
     for path in sorted(symbol_dir.glob("*.csv")):
         contract = path.stem.upper()
-        df = pd.read_csv(path)
+        df = _read_contract_csv(path)
         normalized = _normalize_contract_market_data(df, contract=contract, source_priority=0)
         if not normalized.empty:
             frames.append(normalized)
@@ -311,7 +418,7 @@ def _load_contract_market_data(symbol_dir: Path) -> pd.DataFrame:
     live_path = _live_contract_market_data_path(symbol_dir)
     if live_path.exists():
         normalized = _normalize_contract_market_data(
-            pd.read_csv(live_path),
+            _read_contract_csv(live_path),
             source_priority=1,
             price_scale=LIVE_PRICE_SCALE_BY_SYMBOL.get(symbol_dir.name.upper(), 1.0),
         )
@@ -523,11 +630,15 @@ def load_carry_file(path: Path) -> pd.DataFrame:
         if col.endswith("_asof_date") or col.endswith("_maturity")
     }
     boolean_cols = {col for col in df.columns if col.endswith("_is_estimated")}
+    boolean_cols.update(col for col in df.columns if col.endswith("_pending_review"))
     diagnostic_text_cols = {
         "settle_kind",
         "lis_curve_contracts",
         "lis_curve_direction",
         "lis_activity_field",
+        "M0_roll_candidate",
+        "M0_roll_activity_field",
+        "M0_roll_reason",
     }
     diagnostic_text_cols.update(col for col in df.columns if col.endswith("_settle_kind"))
     text_cols = {
@@ -595,6 +706,31 @@ def load_carry_file(path: Path) -> pd.DataFrame:
                 symbol=path.stem,
                 context=str(path),
             )
+
+    # A carry file can look current because its date, activity and chained
+    # return columns were extended even when the selected front settlement was
+    # not written.  Allowing that partial row into commodity signals lets
+    # return-based cross-commodity features run past the last auditable price.
+    # Fail at the ingestion boundary instead of waiting for a downstream SCO
+    # validation to discover the mismatch.
+    latest_date = df["date"].max()
+    latest = df.loc[df["date"].eq(latest_date)]
+    selected_front = latest["M0_con"].notna()
+    valid_front_settle = pd.to_numeric(
+        latest["M0_settle"], errors="coerce"
+    ).gt(0)
+    if selected_front.any() and not valid_front_settle.any():
+        symbol = path.stem.upper()
+        raise ValueError(
+            f"{path} extends to {latest_date.date()} with a selected M0 contract "
+            "but no valid M0_settle on the latest row. The carry artifact is "
+            "partially updated. For a manually maintained legacy carry file, "
+            f"first run: uv run python scripts/repair_legacy_carry_settlements.py "
+            f"--symbol {symbol}. Otherwise rebuild it before building commodity signals: "
+            f"uv run comm-ls build-carry-data --symbol {symbol} "
+            "--commodity-dir data/comm --output-dir data/comm/carry_data "
+            "--overwrite"
+        )
     return df
 
 
@@ -616,7 +752,7 @@ def _load_contract_settles(
         path = symbol_dir / f"{contract}.csv"
         if not path.exists():
             continue
-        df = pd.read_csv(path, usecols=["date", "px_settle", "px_last"])
+        df = _read_contract_csv(path, usecols=["date", "px_settle", "px_last"])
         normalized = _normalize_contract_market_data(df, contract=contract, source_priority=0)
         if not normalized.empty:
             frames.append(normalized)
@@ -624,7 +760,7 @@ def _load_contract_settles(
     live_path = _live_contract_market_data_path(symbol_dir)
     if live_path.exists():
         live = _normalize_contract_market_data(
-            pd.read_csv(live_path),
+            _read_contract_csv(live_path),
             source_priority=1,
             price_scale=LIVE_PRICE_SCALE_BY_SYMBOL.get(symbol_dir.name.upper(), 1.0),
         )
@@ -857,6 +993,81 @@ def add_ng_seasonal_features(signals: pd.DataFrame, commodity_dir: Path) -> pd.D
 def _same_contract_log_return(settle: pd.Series, contract: pd.Series, periods: int) -> pd.Series:
     value = np.log(settle.where(settle > 0)).diff(periods)
     return value.where(contract == contract.shift(periods))
+
+
+def _rolling_observed_sum(value: pd.Series, periods: int) -> pd.Series:
+    """Sum the latest ``periods`` valid observations without bridging the gap row.
+
+    Commodity artifacts can contain an isolated missing settlement while the
+    surrounding original-contract observations remain valid.  The missing row
+    itself must stay unavailable, but it should not poison the following
+    ``periods`` signal rows as a standard fixed-row rolling window would.
+    """
+    observed = pd.to_numeric(value, errors="coerce").dropna()
+    return observed.rolling(periods, min_periods=periods).sum().reindex(value.index)
+
+
+def add_front_third_same_contract_change_features(
+    signals: pd.DataFrame,
+    commodity_dir: Path,
+    periods: int = 21,
+) -> pd.DataFrame:
+    """Change in front/third carry using today's exact M0/M2 contracts."""
+    out = signals.copy()
+    feature = f"front_third_annualized_carry_same_contract_chg_{periods}d"
+    out[feature] = np.nan
+
+    for symbol, index in out.groupby("symbol", sort=False).groups.items():
+        group = out.loc[index].sort_values("date").copy()
+        market = _load_contract_market_data(commodity_dir / str(symbol).upper())
+        if market.empty:
+            continue
+
+        requests = pd.DataFrame(
+            {
+                "row_index": group.index,
+                "lookback_date": pd.to_datetime(group["date"], utc=False).shift(periods),
+                "front_contract": group["M0_con"].astype("string"),
+                "deferred_contract": group["M2_con"].astype("string"),
+                "current_carry": pd.to_numeric(
+                    group["front_third_annualized_carry"], errors="coerce"
+                ),
+            }
+        )
+        prices = market[["date", "contract", "settle"]].copy()
+        prices["contract"] = prices["contract"].astype("string")
+        requests = requests.merge(
+            prices.rename(
+                columns={
+                    "date": "lookback_date",
+                    "contract": "front_contract",
+                    "settle": "lookback_front_settle",
+                }
+            ),
+            on=["lookback_date", "front_contract"],
+            how="left",
+        ).merge(
+            prices.rename(
+                columns={
+                    "date": "lookback_date",
+                    "contract": "deferred_contract",
+                    "settle": "lookback_deferred_settle",
+                }
+            ),
+            on=["lookback_date", "deferred_contract"],
+            how="left",
+        )
+        lookback_carry = _annualized_log_spread(
+            requests["lookback_front_settle"],
+            requests["lookback_deferred_settle"],
+            requests["front_contract"],
+            requests["deferred_contract"],
+        )
+        out.loc[requests["row_index"], feature] = (
+            requests["current_carry"].to_numpy() - lookback_carry.to_numpy()
+        )
+
+    return out
 
 
 def add_calendar_contract_features(signals: pd.DataFrame, commodity_dir: Path) -> pd.DataFrame:
@@ -1631,7 +1842,7 @@ def build_commodity_signal_frame(
         m2_ret = g["m2_ret"] if "m2_ret" in g.columns else third.pct_change()
         m0_log_ret_v2 = pd.to_numeric(m0_ret, errors="coerce")
         front_log_ret_v2 = {
-            periods: m0_log_ret_v2.rolling(periods, min_periods=periods).sum()
+            periods: _rolling_observed_sum(m0_log_ret_v2, periods)
             for periods in (5, 21, 42, 63)
         }
         front_log_ret_1d = np.log(front.where(front > 0)).diff()
@@ -1802,6 +2013,10 @@ def build_commodity_signal_frame(
 
     signals = pd.concat(frames, ignore_index=True)
     if commodity_dir is not None:
+        signals = add_front_third_same_contract_change_features(
+            signals,
+            commodity_dir=commodity_dir,
+        )
         signals = add_calendar_contract_features(signals, commodity_dir=commodity_dir)
         signals = add_ng_seasonal_features(signals, commodity_dir=commodity_dir)
         signals = add_brent_led_synchronized_carry_features(

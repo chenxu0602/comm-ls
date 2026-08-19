@@ -23,6 +23,7 @@ CHEMICAL_SHORT_EXIT_LEVEL = -0.05
 SHIPPING_CARRY_CHANGE_LOOKBACK_DAYS = 20
 SHIPPING_CARRY_CHANGE_RESET_LEVEL = 0.01
 SHIPPING_MOMENTUM_FEATURE = "front_log_ret_5d_v2"
+SHIPPING_ACCEL_FEATURE = "ret_accel_21d_vs_63d_v2"
 FEATURE_OBSERVED_PREFIX = "__feature_observed__"
 SERVICE_VOL_LOOKBACK_DAYS = 60
 SERVICE_VOL_MIN_PERIODS = 30
@@ -46,6 +47,9 @@ class SleeveConfig:
     signal_rule: str = "hysteresis"
     auxiliary_features: tuple[str, ...] = ()
     combined_share_rounding: bool = False
+    feature_scale: str = "value"
+    lower_threshold: float | None = None
+    upper_threshold: float | None = None
 
 
 # Source of truth: notebooks/backtest_cl.ipynb, cells 1 and 4-11.
@@ -107,6 +111,8 @@ CL_V32_SLEEVE_CONFIG: dict[str, SleeveConfig] = {
         signal_rule="service_volatility_hysteresis",
     ),
     "shipping": SleeveConfig(
+        # Keep the shipping sleeve at its original 25% allocation. Tanker-rate
+        # confirmation remains a research overlay until separately approved.
         weight=0.25,
         tickers=("DHT", "FRO", "TNK", "STNG", "INSW"),
         feature_symbol="CL",
@@ -196,13 +202,27 @@ def validate_config(config: dict[str, SleeveConfig]) -> None:
             raise ValueError(f"{sleeve} has unknown position mode {cfg.position_mode}")
         if cfg.signal_rule not in {
             "hysteresis",
+            "asymmetric_hysteresis",
+            "band_hysteresis",
             "chemical_inflection",
             "shipping_sticky",
+            "shipping_sticky_accel",
+            "service_asymmetric_z",
             "service_volatility_hysteresis",
         }:
             raise ValueError(f"{sleeve} has unknown signal rule {cfg.signal_rule}")
         if cfg.signal_rule == "shipping_sticky" and SHIPPING_MOMENTUM_FEATURE not in cfg.auxiliary_features:
             raise ValueError(f"{sleeve} shipping_sticky rule requires {SHIPPING_MOMENTUM_FEATURE}")
+        if cfg.signal_rule == "shipping_sticky_accel":
+            required = {SHIPPING_MOMENTUM_FEATURE, SHIPPING_ACCEL_FEATURE}
+            if not required.issubset(cfg.auxiliary_features):
+                raise ValueError(f"{sleeve} shipping_sticky_accel rule requires {sorted(required)}")
+        if cfg.signal_rule == "band_hysteresis" and (
+            cfg.lower_threshold is None or cfg.upper_threshold is None
+        ):
+            raise ValueError(f"{sleeve} band_hysteresis requires lower_threshold and upper_threshold")
+        if cfg.feature_scale not in {"value", "z"}:
+            raise ValueError(f"{sleeve} has unknown feature scale {cfg.feature_scale}")
 
 
 def normalize_index(index: pd.Index) -> pd.DatetimeIndex:
@@ -283,6 +303,42 @@ def hysteresis_signal(feature: pd.Series, cfg: SleeveConfig) -> pd.Series:
     return signal
 
 
+def asymmetric_hysteresis_signal(feature: pd.Series, cfg: SleeveConfig) -> pd.Series:
+    """Build v4.1's +/-threshold entries and +/-half-threshold exits."""
+    value = pd.to_numeric(feature, errors="coerce")
+    long_state = pd.Series(np.nan, index=value.index, dtype=float)
+    short_state = pd.Series(np.nan, index=value.index, dtype=float)
+
+    long_state.loc[value > cfg.threshold] = float(cfg.side_mult)
+    long_state.loc[value < -cfg.threshold / 2.0] = 0.0
+    short_state.loc[value < -cfg.threshold] = float(-cfg.side_mult)
+    short_state.loc[value > cfg.threshold / 2.0] = 0.0
+
+    invalid = value.isna()
+    long_state.loc[invalid] = 0.0
+    short_state.loc[invalid] = 0.0
+    return long_state.ffill().fillna(0.0) + short_state.ffill().fillna(0.0)
+
+
+def band_hysteresis_signal(feature: pd.Series, cfg: SleeveConfig) -> pd.Series:
+    """Build v4.1 refiner state using separate lower and upper boundaries."""
+    value = pd.to_numeric(feature, errors="coerce")
+    lower = float(cfg.lower_threshold)
+    upper = float(cfg.upper_threshold)
+    long_state = pd.Series(np.nan, index=value.index, dtype=float)
+    short_state = pd.Series(np.nan, index=value.index, dtype=float)
+
+    long_state.loc[value > upper] = float(cfg.side_mult)
+    long_state.loc[value < lower] = 0.0
+    short_state.loc[value < lower] = float(-cfg.side_mult)
+    short_state.loc[value > upper] = 0.0
+
+    invalid = value.isna()
+    long_state.loc[invalid] = 0.0
+    short_state.loc[invalid] = 0.0
+    return long_state.ffill().fillna(0.0) + short_state.ffill().fillna(0.0)
+
+
 def chemical_inflection_signal(feature: pd.Series) -> pd.Series:
     """Build the notebook's asymmetric carry-inflection state for chemicals."""
     value = pd.to_numeric(feature, errors="coerce")
@@ -319,6 +375,49 @@ def shipping_sticky_signal(carry: pd.Series, momentum: pd.Series) -> pd.Series:
     state_update.loc[short_entry] = -1.0
     state_update.loc[invalid] = 0.0
     return state_update.ffill().fillna(0.0)
+
+
+def shipping_sticky_accel_signal(
+    carry: pd.Series,
+    momentum: pd.Series,
+    accel: pd.Series,
+) -> pd.Series:
+    """Build v4.1 tanker state, including the notebook's long-entry accel gate."""
+    carry = pd.to_numeric(carry, errors="coerce")
+    momentum = pd.to_numeric(momentum, errors="coerce")
+    accel = pd.to_numeric(accel, errors="coerce")
+    carry_change = carry.diff(SHIPPING_CARRY_CHANGE_LOOKBACK_DAYS)
+
+    long_entry = (momentum < 0.0) & (carry < 0.0) & (accel > -0.05)
+    short_entry = (momentum > 0.0) & (carry > 0.0)
+    reset_state = carry_change > SHIPPING_CARRY_CHANGE_RESET_LEVEL
+    # Match the executed notebook exactly: accel gates long entry, but an
+    # unavailable accel observation does not itself flatten an existing state.
+    invalid = carry.isna() | momentum.isna()
+
+    state_update = pd.Series(np.nan, index=carry.index, dtype=float)
+    state_update.loc[long_entry] = 1.0
+    state_update.loc[reset_state] = 0.0
+    state_update.loc[short_entry] = -1.0
+    state_update.loc[invalid] = 0.0
+    return state_update.ffill().fillna(0.0)
+
+
+def service_asymmetric_z_signal(feature: pd.Series, cfg: SleeveConfig) -> pd.Series:
+    """Build v4.1 service state from the cached commodity-feature z-score."""
+    value = pd.to_numeric(feature, errors="coerce")
+    long_state = pd.Series(np.nan, index=value.index, dtype=float)
+    short_state = pd.Series(np.nan, index=value.index, dtype=float)
+
+    long_state.loc[value > cfg.threshold] = 0.5 * float(cfg.side_mult)
+    long_state.loc[value < -cfg.threshold / 2.0] = 0.0
+    short_state.loc[value < -cfg.threshold] = -1.0 * float(cfg.side_mult)
+    short_state.loc[value > cfg.threshold / 2.0] = 0.0
+
+    invalid = value.isna()
+    long_state.loc[invalid] = 0.0
+    short_state.loc[invalid] = 0.0
+    return long_state.ffill().fillna(0.0) + short_state.ffill().fillna(0.0)
 
 
 def service_volatility_hysteresis_signal(feature: pd.Series, cfg: SleeveConfig) -> pd.Series:
@@ -379,10 +478,22 @@ def signal_from_features(features: pd.DataFrame, cfg: SleeveConfig) -> pd.Series
         raise KeyError(f"Missing features for {cfg.signal_rule}: {missing}")
     if cfg.signal_rule == "hysteresis":
         return hysteresis_signal(features[cfg.feature], cfg)
+    if cfg.signal_rule == "asymmetric_hysteresis":
+        return asymmetric_hysteresis_signal(features[cfg.feature], cfg)
+    if cfg.signal_rule == "band_hysteresis":
+        return band_hysteresis_signal(features[cfg.feature], cfg)
     if cfg.signal_rule == "chemical_inflection":
         return chemical_inflection_signal(features[cfg.feature]) * float(cfg.side_mult)
     if cfg.signal_rule == "shipping_sticky":
         return shipping_sticky_signal(features[cfg.feature], features[SHIPPING_MOMENTUM_FEATURE])
+    if cfg.signal_rule == "shipping_sticky_accel":
+        return shipping_sticky_accel_signal(
+            features[cfg.feature],
+            features[SHIPPING_MOMENTUM_FEATURE],
+            features[SHIPPING_ACCEL_FEATURE],
+        )
+    if cfg.signal_rule == "service_asymmetric_z":
+        return service_asymmetric_z_signal(features[cfg.feature], cfg)
     if cfg.signal_rule == "service_volatility_hysteresis":
         return service_volatility_hysteresis_signal(features[cfg.feature], cfg)
     raise ValueError(f"Unknown signal rule: {cfg.signal_rule}")

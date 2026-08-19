@@ -13,6 +13,10 @@ from comm_ls.commodity import (
     FUTURES_MONTH_CODES,
     FUTURES_MONTH_NUMBERS,
     LIVE_PRICE_SCALE_BY_SYMBOL,
+    _live_contract_preferred_start_date,
+    _read_contract_csv,
+    _resolve_contract_duplicates,
+    _validate_live_contract_dates,
 )
 
 
@@ -56,6 +60,11 @@ class CarryBuildConfig:
     volume_staleness_sessions: int = 2
     oi_staleness_sessions: int = 5
     roll_confirmation_observations: int = 2
+    roll_policy: str = "confirmed"
+    fast_roll_fallback_window_days: int = 20
+    fast_roll_min_history: int = 12
+    fast_roll_mad_multiplier: float = 2.0
+    fast_roll_min_activity_ratio: float = 1.25
     lis_ratio: float = 0.60
     activity_threshold: float = 0.005
     arrival_hour_utc: int = 8
@@ -165,10 +174,10 @@ def _normalize_source_frame(
     out = out[out["contract"].map(_valid_contract_name)].dropna(subset=["date"])
     if out.empty:
         return out
+    if source == "live":
+        _validate_live_contract_dates(out)
 
-    # Keep the last supplied row for an accidental duplicate, but choose
-    # settlement before last within that row above.
-    return out.drop_duplicates(["date", "contract"], keep="last").reset_index(drop=True)
+    return _resolve_contract_duplicates(out)
 
 
 def _load_source_frames(symbol: str, commodity_dir: Path) -> tuple[pd.DataFrame, pd.DataFrame]:
@@ -178,7 +187,7 @@ def _load_source_frames(symbol: str, commodity_dir: Path) -> tuple[pd.DataFrame,
     if symbol_dir.exists():
         for path in sorted(symbol_dir.glob("*.csv")):
             normalized = _normalize_source_frame(
-                pd.read_csv(path),
+                _read_contract_csv(path),
                 source="history",
                 contract=path.stem,
             )
@@ -189,7 +198,7 @@ def _load_source_frames(symbol: str, commodity_dir: Path) -> tuple[pd.DataFrame,
     live_path = commodity_dir / "live_data" / f"{live_symbol}.csv"
     if live_path.exists():
         live = _normalize_source_frame(
-            pd.read_csv(live_path),
+            _read_contract_csv(live_path),
             source="live",
             price_scale=LIVE_PRICE_SCALE_BY_SYMBOL.get(symbol, 1.0),
         )
@@ -200,28 +209,42 @@ def _load_source_frames(symbol: str, commodity_dir: Path) -> tuple[pd.DataFrame,
     return history, live
 
 
-def _history_first_field(
+def _cutover_preferred_field(
     merged: pd.DataFrame,
     *,
     field: str,
+    live_preferred_start_date: pd.Timestamp,
 ) -> tuple[pd.Series, pd.Series]:
     history = merged.get(f"{field}__history", pd.Series(np.nan, index=merged.index))
     live = merged.get(f"{field}__live", pd.Series(np.nan, index=merged.index))
-    value = history.fillna(live)
+    post_cutover = pd.to_datetime(merged["date"], errors="coerce").ge(
+        live_preferred_start_date
+    )
+    value = pd.Series(np.nan, index=merged.index, dtype=float)
     source = pd.Series(pd.NA, index=merged.index, dtype="string")
-    source.loc[history.notna()] = "history"
-    source.loc[history.isna() & live.notna()] = "live_fallback"
+    selections = (
+        (~post_cutover & history.notna(), history, "history"),
+        (~post_cutover & history.isna() & live.notna(), live, "live_fallback"),
+        (post_cutover & live.notna(), live, "live"),
+        (post_cutover & live.isna() & history.notna(), history, "history_fallback"),
+    )
+    for condition, selected, selected_source in selections:
+        value.loc[condition] = selected.loc[condition]
+        source.loc[condition] = selected_source
     return value, source
 
 
-def _history_first_settle(
+def _cutover_preferred_settle(
     merged: pd.DataFrame,
+    *,
+    live_preferred_start_date: pd.Timestamp,
 ) -> tuple[pd.Series, pd.Series, pd.Series]:
-    """Select settlement-first prices while keeping history authoritative.
+    """Select settlement-first prices using the configured source cutover.
 
-    An official live settlement may fill a historical row whose official
-    settlement is absent. A historical last price is only used after both
-    sources' official settlements have been considered.
+    Before the cutover, history is preferred and live fills missing fields.
+    On and after the cutover, live is preferred and history fills missing
+    fields.  Within either period, official settlements from both sources are
+    considered before a last-price fallback.
     """
     history = merged.get("settle__history", pd.Series(np.nan, index=merged.index))
     live = merged.get("settle__live", pd.Series(np.nan, index=merged.index))
@@ -235,21 +258,24 @@ def _history_first_settle(
     official_kinds = {"settlement", "settlement_scaled"}
     history_official = history.notna() & history_kind.isin(official_kinds)
     live_official = live.notna() & live_kind.isin(official_kinds)
-    conditions = [
-        history_official,
-        ~history_official & live_official,
-        ~history_official & ~live_official & history.notna(),
-        ~history_official & ~live_official & history.isna() & live.notna(),
-    ]
+    post_cutover = pd.to_datetime(merged["date"], errors="coerce").ge(
+        live_preferred_start_date
+    )
     value = pd.Series(np.nan, index=merged.index, dtype=float)
     source = pd.Series(pd.NA, index=merged.index, dtype="string")
     kind = pd.Series(pd.NA, index=merged.index, dtype="string")
-    for condition, selected, selected_source, selected_kind in zip(
-        conditions,
-        (history, live, history, live),
-        ("history", "live_fallback", "history_last", "live_last_fallback"),
-        (history_kind, live_kind, history_kind, live_kind),
-    ):
+    selections = (
+        (~post_cutover & history_official, history, "history", history_kind),
+        (~post_cutover & live_official, live, "live_fallback", live_kind),
+        (~post_cutover & history.notna(), history, "history_last", history_kind),
+        (~post_cutover & live.notna(), live, "live_last_fallback", live_kind),
+        (post_cutover & live_official, live, "live", live_kind),
+        (post_cutover & history_official, history, "history_fallback", history_kind),
+        (post_cutover & live.notna(), live, "live_last", live_kind),
+        (post_cutover & history.notna(), history, "history_last_fallback", history_kind),
+    )
+    for eligible, selected, selected_source, selected_kind in selections:
+        condition = eligible & value.isna()
         value.loc[condition] = selected.loc[condition]
         source.loc[condition] = selected_source
         kind.loc[condition] = selected_kind.loc[condition]
@@ -349,14 +375,19 @@ def load_contract_panel(config: CarryBuildConfig) -> pd.DataFrame:
         merged = history_indexed.join(live_indexed, how="outer").reset_index()
 
     merged = merged.sort_values(index_columns).reset_index(drop=True)
+    live_preferred_start_date = _live_contract_preferred_start_date(
+        config.commodity_dir / symbol
+    )
     out = merged[index_columns].copy()
-    out["settle"], out["settle_source"], out["settle_kind"] = _history_first_settle(
-        merged
+    out["settle"], out["settle_source"], out["settle_kind"] = _cutover_preferred_settle(
+        merged,
+        live_preferred_start_date=live_preferred_start_date,
     )
     for field in ("open", "high", "low", "volume", "open_interest"):
-        out[field], out[f"{field}_source"] = _history_first_field(
+        out[field], out[f"{field}_source"] = _cutover_preferred_field(
             merged,
             field=field,
+            live_preferred_start_date=live_preferred_start_date,
         )
 
     all_dates = sorted(pd.Timestamp(value) for value in out["date"].dropna().unique())
@@ -385,7 +416,18 @@ def load_contract_panel(config: CarryBuildConfig) -> pd.DataFrame:
     out["tm"] = (out["maturity"] - out["date"]).dt.days / DAYS_IN_YEAR
     out = out.sort_values(["contract", "date"]).reset_index(drop=True)
     positive = out["settle"].gt(0)
-    prior = out.groupby("contract", observed=True)["settle"].shift(1)
+    # Compare each valid settlement with the previous valid observation for
+    # the same original contract.  A partially updated source can contain an
+    # isolated row with no settle; using a plain shift would discard both that
+    # row and the following valid contract return, unnecessarily breaking all
+    # downstream rolling-return features.
+    valid_settle = out["settle"].where(positive)
+    prior = (
+        valid_settle.groupby(out["contract"], observed=True)
+        .ffill()
+        .groupby(out["contract"], observed=True)
+        .shift(1)
+    )
     contract_ratio = (out["settle"] / prior).where(positive & prior.gt(0))
     out["contract_ret"] = np.log(contract_ratio)
     out["ret_std_20"] = out.groupby("contract", observed=True)["contract_ret"].transform(
@@ -467,6 +509,85 @@ def contract_maturity(
     return convention
 
 
+def _legacy_maturity_map(
+    *,
+    symbol: str,
+    commodity_dir: Path,
+    contracts: Iterable[str],
+) -> dict[str, pd.Timestamp]:
+    """Reproduce the maturity convention used by the original carry writer.
+
+    The legacy ``bbg_data.load_data`` path (which is what
+    ``build_carry_files`` called) used the fifth-last business day of the
+    contract month for all non-crypto products, plus a 0.001-year offset.  It
+    also extended a contract's maturity to its latest *historical row* when
+    that row was later than the convention.  Importantly, that historical
+    max-date calculation did not include the separate live fallback file.
+    """
+    symbol = symbol.upper().strip()
+    history, _ = _load_source_frames(symbol, commodity_dir)
+    history_max = (
+        history.groupby("contract", observed=True)["date"].max().to_dict()
+        if not history.empty
+        else {}
+    )
+
+    out: dict[str, pd.Timestamp] = {}
+    for contract in contracts:
+        year, month = contract_sort_key(contract)
+        month_end = pd.Timestamp(year=year, month=month, day=1) + pd.offsets.MonthEnd(0)
+        if symbol in CRYPTO_SYMBOLS:
+            convention = month_end - pd.Timedelta(
+                days=(month_end.weekday() - 4) % 7
+            )
+            out[contract] = convention
+            continue
+
+        # Match bbg_data.contract_to_last_5th_working_day exactly. Its
+        # ``MonthEnd(0) - BDay(0)`` behavior rolls a weekend month-end to the
+        # following Monday before subtracting four business days.
+        last_bday = month_end - pd.offsets.BDay(0)
+        convention = last_bday - pd.offsets.BDay(4)
+        observed = history_max.get(contract)
+        if observed is not None and pd.Timestamp(observed) >= convention:
+            convention = pd.Timestamp(observed).normalize()
+        out[contract] = convention
+    return out
+
+
+def _legacy_panel_for_carry(
+    panel: pd.DataFrame,
+    *,
+    symbol: str,
+    commodity_dir: Path,
+) -> pd.DataFrame:
+    """Apply the old source normalization required for carry reconciliation."""
+    legacy = panel.copy()
+    maturity = _legacy_maturity_map(
+        symbol=symbol,
+        commodity_dir=commodity_dir,
+        contracts=legacy["contract"].dropna().astype(str).unique(),
+    )
+    legacy["maturity"] = legacy["contract"].map(maturity)
+    # bbg_data._finalize_loaded_data used 365.25 days plus a 0.001-year
+    # offset, including on the contract's convention expiry date.
+    legacy["tm"] = (
+        (pd.to_datetime(legacy["maturity"]) - pd.to_datetime(legacy["date"])).dt.days
+        / DAYS_IN_YEAR
+        + 0.001
+    )
+
+    # The old loader first filled a missing settle from the previous valid
+    # settle for the same contract, then used same-row px_last. The current
+    # panel has already applied the same-row settlement/last precedence, so
+    # only the per-contract historical carry-forward remains here.
+    legacy = legacy.sort_values(["contract", "date"])
+    legacy["settle"] = legacy.groupby("contract", observed=True)["settle"].ffill()
+    # calc_carry_hist forward-filled volume without a staleness limit.
+    legacy["volume"] = legacy.groupby("contract", observed=True)["volume"].ffill()
+    return legacy.sort_values(["date", "contract"]).reset_index(drop=True)
+
+
 def _eligible_months(symbol: str) -> tuple[int, ...]:
     return ACTIVE_CONTRACT_MONTHS_BY_SYMBOL.get(symbol.upper(), ALL_CONTRACT_MONTHS)
 
@@ -475,6 +596,38 @@ def _evidence_key(row: pd.Series, field: str) -> tuple[object]:
     # A carried-forward observation does not become fresh evidence merely
     # because its source label changes from history to history_estimate.
     return (row.get(f"{field}_asof_date"),)
+
+
+def _activity_is_fresh(row: pd.Series, field: str, date: pd.Timestamp) -> bool:
+    value = pd.to_numeric(pd.Series([row.get(field)]), errors="coerce").iloc[0]
+    asof = pd.to_datetime(row.get(f"{field}_asof_date"), errors="coerce")
+    return bool(
+        pd.notna(value)
+        and value >= 0
+        and pd.notna(asof)
+        and pd.Timestamp(asof).normalize() == pd.Timestamp(date).normalize()
+    )
+
+
+def _fast_roll_window(
+    roll_lead_dte_history: Sequence[float],
+    *,
+    fallback_window_days: int,
+    min_history: int,
+    mad_multiplier: float,
+) -> tuple[float, float | None, float | None]:
+    history = np.asarray(
+        [value for value in roll_lead_dte_history if np.isfinite(value)],
+        dtype=float,
+    )
+    if len(history) < min_history:
+        return float(fallback_window_days), None, None
+    median = float(np.median(history))
+    mad = float(np.median(np.abs(history - median)))
+    # The two-day floor prevents an unrealistically narrow window when past
+    # rolls happened on exactly the same DTE.
+    upper = median + max(2.0, mad_multiplier * mad)
+    return upper, median, mad
 
 
 def select_front_contracts(
@@ -486,8 +639,16 @@ def select_front_contracts(
     max_maturity_years: float = 0.75,
     initialize_from_nearest: bool = False,
     stepwise: bool = True,
-) -> pd.Series:
+    roll_policy: str = "confirmed",
+    fast_roll_fallback_window_days: int = 20,
+    fast_roll_min_history: int = 12,
+    fast_roll_mad_multiplier: float = 2.0,
+    fast_roll_min_activity_ratio: float = 1.25,
+    return_diagnostics: bool = False,
+) -> pd.Series | tuple[pd.Series, pd.DataFrame]:
     """Select a no-lookahead, monotone front chain with roll hysteresis."""
+    if roll_policy not in {"confirmed", "adaptive-fast"}:
+        raise ValueError(f"Unsupported roll_policy: {roll_policy!r}")
     allowed = set(allowed_months or _eligible_months(symbol))
     working = panel.loc[
         panel["contract_month"].dt.month.isin(allowed)
@@ -496,17 +657,32 @@ def select_front_contracts(
     ].copy()
     dates = sorted(panel["date"].dropna().unique())
     selected = pd.Series(pd.NA, index=pd.Index(dates, name="date"), dtype="string")
+    diagnostics = pd.DataFrame(index=selected.index)
+    diagnostics["M0_roll_candidate"] = pd.Series(pd.NA, index=selected.index, dtype="string")
+    diagnostics["M0_roll_signal_count"] = 0
+    diagnostics["M0_roll_activity_field"] = pd.Series(
+        pd.NA, index=selected.index, dtype="string"
+    )
+    diagnostics["M0_roll_activity_ratio"] = np.nan
+    diagnostics["M0_roll_days_to_maturity"] = np.nan
+    diagnostics["M0_roll_expected_dte_median"] = np.nan
+    diagnostics["M0_roll_expected_dte_mad"] = np.nan
+    diagnostics["M0_roll_reason"] = pd.Series(pd.NA, index=selected.index, dtype="string")
+    diagnostics["M0_roll_pending_review"] = False
     maturity_by_contract = panel.groupby("contract")["maturity"].max()
 
     current: str | None = None
     candidate: str | None = None
     confirmations = 0
     last_evidence: tuple[object, ...] | None = None
+    candidate_start_dte: float | None = None
+    roll_lead_dte_history: list[float] = []
 
     for date in dates:
         day = working.loc[working["date"].eq(date)].copy()
         if day.empty:
             selected.loc[date] = current if current is not None else pd.NA
+            diagnostics.loc[date, "M0_roll_reason"] = "no_usable_contract_data"
             continue
         day["sort_key"] = day["contract"].map(contract_sort_key)
         day = day.sort_values("sort_key")
@@ -523,7 +699,9 @@ def select_front_contracts(
                 candidate = None
                 confirmations = 0
                 last_evidence = None
+                candidate_start_dte = None
                 selected.loc[date] = current
+                diagnostics.loc[date, "M0_roll_reason"] = "missing_unexpired_front"
                 continue
             current_key = contract_sort_key(current)
             later = day.loc[
@@ -531,12 +709,15 @@ def select_front_contracts(
             ]
             if not later.empty:
                 current = str(later.iloc[0]["contract"])
+                diagnostics.loc[date, "M0_roll_reason"] = "forced_after_maturity"
             else:
                 selected.loc[date] = current
+                diagnostics.loc[date, "M0_roll_reason"] = "no_later_contract"
                 continue
             candidate = None
             confirmations = 0
             last_evidence = None
+            candidate_start_dte = None
 
         if current is None:
             if initialize_from_nearest:
@@ -599,21 +780,95 @@ def select_front_contracts(
                 candidate = leader
                 confirmations = 1
                 last_evidence = evidence
+                maturity = maturity_by_contract.get(current, pd.NaT)
+                candidate_start_dte = (
+                    float((pd.Timestamp(maturity) - pd.Timestamp(date)).days)
+                    if pd.notna(maturity)
+                    else None
+                )
             elif evidence != last_evidence:
                 confirmations += 1
                 last_evidence = evidence
-            if confirmations >= confirmation_observations:
+
+            current_value = pd.to_numeric(
+                pd.Series([current_row.get(field)]), errors="coerce"
+            ).iloc[0]
+            leader_value = pd.to_numeric(
+                pd.Series([leader_row.get(field)]), errors="coerce"
+            ).iloc[0]
+            activity_ratio = (
+                float(leader_value / current_value)
+                if pd.notna(leader_value) and pd.notna(current_value) and current_value > 0
+                else np.nan
+            )
+            window, expected_median, expected_mad = _fast_roll_window(
+                roll_lead_dte_history,
+                fallback_window_days=fast_roll_fallback_window_days,
+                min_history=fast_roll_min_history,
+                mad_multiplier=fast_roll_mad_multiplier,
+            )
+            dte = candidate_start_dte
+            primary_fresh = _activity_is_fresh(current_row, field, date) and _activity_is_fresh(
+                leader_row, field, date
+            )
+            volume_agrees = (
+                _activity_is_fresh(current_row, "volume", date)
+                and _activity_is_fresh(leader_row, "volume", date)
+                and pd.to_numeric(leader_row.get("volume"), errors="coerce")
+                > pd.to_numeric(current_row.get("volume"), errors="coerce")
+            )
+            oi_agrees = (
+                _activity_is_fresh(current_row, "open_interest", date)
+                and _activity_is_fresh(leader_row, "open_interest", date)
+                and pd.to_numeric(leader_row.get("open_interest"), errors="coerce")
+                > pd.to_numeric(current_row.get("open_interest"), errors="coerce")
+            )
+            inside_window = dte is not None and 0 <= dte <= window
+            strong_primary = primary_fresh and np.isfinite(activity_ratio) and (
+                activity_ratio >= fast_roll_min_activity_ratio
+            )
+            adaptive_fast = bool(
+                roll_policy == "adaptive-fast"
+                and inside_window
+                and primary_fresh
+                and ((volume_agrees and oi_agrees) or strong_primary)
+            )
+
+            diagnostics.loc[date, "M0_roll_candidate"] = leader
+            diagnostics.loc[date, "M0_roll_signal_count"] = confirmations
+            diagnostics.loc[date, "M0_roll_activity_field"] = field
+            diagnostics.loc[date, "M0_roll_activity_ratio"] = activity_ratio
+            diagnostics.loc[date, "M0_roll_days_to_maturity"] = dte
+            diagnostics.loc[date, "M0_roll_expected_dte_median"] = expected_median
+            diagnostics.loc[date, "M0_roll_expected_dte_mad"] = expected_mad
+
+            confirmed = confirmations >= confirmation_observations
+            if adaptive_fast or confirmed:
+                if candidate_start_dte is not None:
+                    roll_lead_dte_history.append(candidate_start_dte)
                 current = leader
+                diagnostics.loc[date, "M0_roll_reason"] = (
+                    "adaptive_fast_roll" if adaptive_fast and not confirmed else "confirmed_roll"
+                )
                 candidate = None
                 confirmations = 0
                 last_evidence = None
+                candidate_start_dte = None
+            else:
+                diagnostics.loc[date, "M0_roll_reason"] = "pending_confirmation"
+                diagnostics.loc[date, "M0_roll_pending_review"] = True
         else:
             candidate = None
             confirmations = 0
             last_evidence = None
+            candidate_start_dte = None
+            if pd.isna(diagnostics.loc[date, "M0_roll_reason"]):
+                diagnostics.loc[date, "M0_roll_reason"] = "hold"
 
         selected.loc[date] = current
 
+    if return_diagnostics:
+        return selected, diagnostics
     return selected
 
 
@@ -762,16 +1017,29 @@ def calculate_lis_carries(
     targets: Iterable[float],
     ratio: float = 0.60,
     activity_threshold: float = 0.005,
+    activity_field: str | None = None,
+    fallback_to_open_interest: bool = True,
+    positive_settle_only: bool = True,
 ) -> pd.DataFrame:
     rows: list[dict[str, object]] = []
     allowed = set(_eligible_months(symbol))
     for date, raw_day in panel.groupby("date", sort=True):
+        settle_valid = (
+            raw_day["settle"].gt(0)
+            if positive_settle_only
+            else raw_day["settle"].notna()
+        )
         day = raw_day.loc[
             raw_day["contract_month"].dt.month.isin(allowed)
             & raw_day["tm"].gt(0)
-            & raw_day["settle"].gt(0)
+            & settle_valid
         ].sort_values(["maturity", "contract"]).copy()
-        field = "volume" if day["volume"].fillna(0).sum() > 0 else "open_interest"
+        if activity_field is not None:
+            field = activity_field
+        elif fallback_to_open_interest:
+            field = "volume" if day["volume"].fillna(0).sum() > 0 else "open_interest"
+        else:
+            field = "volume"
         total_activity = day[field].fillna(0).sum()
         if total_activity > 0:
             day = day.loc[day[field].fillna(0).ge(total_activity * activity_threshold)].copy()
@@ -846,19 +1114,27 @@ def build_carry_frame(config: CarryBuildConfig) -> pd.DataFrame:
         key=contract_sort_key,
     )
 
-    m0 = select_front_contracts(
+    m0, m0_roll_diagnostics = select_front_contracts(
         panel,
         symbol=symbol,
         confirmation_observations=config.roll_confirmation_observations,
         initialize_from_nearest=symbol in MONTHLY_STEPWISE_FRONT_SYMBOLS,
         stepwise=symbol in MONTHLY_STEPWISE_FRONT_SYMBOLS,
-    ).reindex(dates)
+        roll_policy=config.roll_policy,
+        fast_roll_fallback_window_days=config.fast_roll_fallback_window_days,
+        fast_roll_min_history=config.fast_roll_min_history,
+        fast_roll_mad_multiplier=config.fast_roll_mad_multiplier,
+        fast_roll_min_activity_ratio=config.fast_roll_min_activity_ratio,
+        return_diagnostics=True,
+    )
+    m0 = m0.reindex(dates)
+    m0_roll_diagnostics = m0_roll_diagnostics.reindex(dates)
     chain_contracts = pd.DataFrame({"M0_con": m0}, index=dates)
     chain_contracts = chain_contracts.join(
         _next_contracts(m0, contract_universe=universe, count=11)
     )
 
-    output = pd.DataFrame(index=dates)
+    output = pd.DataFrame(index=dates).join(m0_roll_diagnostics.reindex(dates))
     for leg in range(3):
         output = output.join(
             _extract_chain_fields(panel, chain_contracts[f"M{leg}_con"], prefix=f"M{leg}")
@@ -887,7 +1163,38 @@ def build_carry_frame(config: CarryBuildConfig) -> pd.DataFrame:
         activity_threshold=config.activity_threshold,
     )
     output = output.join(lis)
-    legacy_label = f"lis_carry_{config.legacy_carry_target:.2f}y".replace(".", "p")
+
+    # Keep the historical strategy input reproducible while retaining the
+    # stricter, current LIS features above. The old carry writer used a
+    # generic fifth-last-business-day maturity convention, per-contract
+    # settlement/volume forward-fill, and volume-only activity selection.
+    legacy_panel = _legacy_panel_for_carry(
+        panel,
+        symbol=symbol,
+        commodity_dir=config.commodity_dir,
+    )
+    legacy_target = config.legacy_carry_target
+    legacy_label = f"legacy_carry_{legacy_target:.2f}y".replace(".", "p")
+    legacy = calculate_lis_carries(
+        legacy_panel,
+        symbol=symbol,
+        targets=(legacy_target,),
+        ratio=config.lis_ratio,
+        activity_threshold=config.activity_threshold,
+        activity_field="volume",
+        fallback_to_open_interest=False,
+        positive_settle_only=False,
+    ).rename(
+        columns={
+            f"lis_carry_{legacy_target:.2f}y".replace(".", "p"): legacy_label,
+            "lis_curve_contracts": "legacy_lis_curve_contracts",
+            "lis_curve_direction": "legacy_lis_curve_direction",
+            "lis_activity_field": "legacy_lis_activity_field",
+            "contango": "legacy_contango",
+            "backwardation": "legacy_backwardation",
+        }
+    )
+    output = output.join(legacy)
     output["carry"] = output[legacy_label]
 
     for far_leg, label in ((1, "front_second"), (2, "front_third"), (5, "front_sixth"), (11, "front_twelfth")):

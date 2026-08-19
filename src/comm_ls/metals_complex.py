@@ -559,12 +559,30 @@ def build_metals_complex_signals(
         output[f"{label}_relative_log_momentum_21d"] = _rolling_observed_sum(
             relative_return, periods=21
         )
+        output[f"{label}_relative_log_momentum_11d"] = _rolling_observed_sum(
+            relative_return, periods=11
+        )
         output[f"{label}_relative_log_momentum_63d"] = _rolling_observed_sum(
             relative_return, periods=63
         )
         output[f"{label}_relative_log_accel_21d_vs_63d"] = (
             output[f"{label}_relative_log_momentum_21d"]
             - output[f"{label}_relative_log_momentum_63d"] / 3.0
+        )
+        # Compare the recent 11-observation relative move with the
+        # 63-observation baseline scaled to the same 11-observation horizon.
+        output[f"{label}_relative_log_accel_11d_vs_63d"] = (
+            output[f"{label}_relative_log_momentum_11d"]
+            - output[f"{label}_relative_log_momentum_63d"] * (11.0 / 63.0)
+        )
+        output[f"{label}_relative_log_momentum_42d"] = _rolling_observed_sum(
+            relative_return, periods=42
+        )
+        # Compare the recent 11-observation relative move with the
+        # 42-observation baseline scaled to the same 11-observation horizon.
+        output[f"{label}_relative_log_accel_11d_vs_42d"] = (
+            output[f"{label}_relative_log_momentum_11d"]
+            - output[f"{label}_relative_log_momentum_42d"] * (11.0 / 42.0)
         )
 
         carry_specs = {
