@@ -10,9 +10,10 @@
 - Total net weight after hedges: -8.05%
 - Turnover from Metals-attributed current positions: 124.05%
 - Full eligible order turnover: 118.05%
-- Today's child-order turnover: 37.22%
-- Daily turnover cap: 40.00%
-- Estimated execution cost: $4.65
+- Today's total child-order turnover: 101.41%
+- Stock daily turnover cap: 40.00%
+- Hedge turnover policy: uncapped; complete integer hedge targets after stock fills.
+- Estimated execution cost: $12.68
 
 ## Isolation and Execution Notes
 
@@ -61,10 +62,11 @@ No reviewed events in the next 31 days.
 
 | instrument_type | component | instrument | execution_action | full_rounded_trade_shares | rounded_trade_shares | execution_trade_weight | direct_reversal_blocked | previous_close | lower_25bps | upper_25bps | execution_instruction |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| stock | miners | FSUGY | BUY | 10 | 4 | 0.020552 | False | 25.69 | 25.63 | 25.75 | execute once; no same-day reversal or duplicate order |
+| stock | miners | FSUGY | BUY | 10 | 7 | 0.035966 | False | 25.69 | 25.63 | 25.75 | execute once; no same-day reversal or duplicate order |
 | stock | sco_specialty_alloys | ATI | BUY | 1 | 1 | 0.041402 | False | 207.01 | 206.49 | 207.53 | execute once; no same-day reversal or duplicate order |
-| stock | sco_vol_gc_hg_accel_miners|sco_vol_miners|miners | BHP | BUY | 6 | 3 | 0.058218 | False | 97.03 | 96.79 | 97.27 | execute once; no same-day reversal or duplicate order |
-| stock | sco_vol_gc_hg_accel_miners|sco_vol_miners|miners | RIO | BUY | 6 | 3 | 0.06318 | False | 105.3 | 105.04 | 105.56 | execute once; no same-day reversal or duplicate order |
-| stock | sco_vol_gc_hg_accel_miners|sco_vol_miners|miners | SCCO | BUY | 3 | 1 | 0.0432 | False | 216 | 215.46 | 216.54 | execute once; no same-day reversal or duplicate order |
-| stock | sco_vol_gc_hg_accel_miners|sco_vol_miners|miners | VALE | BUY | 24 | 9 | 0.026262 | False | 14.59 | 14.55 | 14.63 | execute once; no same-day reversal or duplicate order |
-| hedge | hedge | XME | SELL | -13 | -5 | -0.11934 | False | 119.34 | 119.04 | 119.64 | single aggregate hedge order after confirming stock fills |
+| stock | sco_vol_gc_hg_accel_miners|sco_vol_miners|miners | BHP | BUY | 6 | 5 | 0.09703 | False | 97.03 | 96.79 | 97.27 | execute once; no same-day reversal or duplicate order |
+| stock | sco_vol_gc_hg_accel_miners|sco_vol_miners|miners | RIO | BUY | 6 | 4 | 0.08424 | False | 105.3 | 105.04 | 105.56 | execute once; no same-day reversal or duplicate order |
+| stock | sco_vol_gc_hg_accel_miners|sco_vol_miners|miners | SCCO | BUY | 3 | 2 | 0.0864 | False | 216 | 215.46 | 216.54 | execute once; no same-day reversal or duplicate order |
+| stock | sco_vol_gc_hg_accel_miners|sco_vol_miners|miners | VALE | BUY | 24 | 18 | 0.052524 | False | 14.59 | 14.55 | 14.63 | execute once; no same-day reversal or duplicate order |
+| hedge | hedge | SPY | SELL | -2 | -2 | -0.306288 | False | 765.72 | 763.81 | 767.63 | single aggregate hedge order after confirming stock fills |
+| hedge | hedge | XME | SELL | -13 | -13 | -0.310284 | False | 119.34 | 119.04 | 119.64 | single aggregate hedge order after confirming stock fills |

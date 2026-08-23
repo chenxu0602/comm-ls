@@ -10,8 +10,9 @@
 - Total net weight after hedges: 20.48%
 - Estimated turnover from current positions: 32.82%
 - Full eligible order turnover: 22.37%
-- Today's child-order turnover: 21.98%
-- Daily turnover cap: 40.00%
+- Today's total child-order turnover: 21.98%
+- Stock daily turnover cap: 40.00%
+- Hedge turnover policy: uncapped; complete integer hedge targets after stock fills.
 - Execution policy: next_session_vwap_30m (09:30-10:00 America/New_York)
 - Estimated stock/hedge execution cost: $8.24
 - Cost assumptions: stock 25.0bps, hedge 25.0bps one-way
