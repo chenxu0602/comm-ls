@@ -11,7 +11,7 @@ import pandas as pd
 from comm_ls.cl_v32_strategy import fixed_hold_position
 
 
-METALS_MAX_SINGLE_NAME_WEIGHT = 0.10
+METALS_MAX_SINGLE_NAME_WEIGHT = 0.12
 METALS_CACHE_PATH = Path("data/cache/feature_return/METALS-multi_return_2.parquet")
 GC_CACHE_PATH = Path("data/cache/feature_return/GC-multi_return_2.parquet")
 SCO_CACHE_PATH = Path("data/cache/feature_return/SCO-multi_return_2.parquet")
@@ -26,6 +26,7 @@ SCO_RETURN_FEATURE = "feature_z__ret_63d_v2"
 SCO_DRAWDOWN_FEATURE = "feature_z__drawdown_63d"
 SCO_VOL_FEATURE = "feature_z__realized_vol_63d"
 SCO_CURVE_VOL_FEATURE = "M0_atr_14"
+SCO_PULSE_VOL_FEATURE = "M0_ret_std_20"
 
 
 @dataclass(frozen=True)
@@ -46,11 +47,12 @@ class MetalsSleeveConfig:
         return "fixed_hold" if self.hold_days is not None else "sign"
 
 
-# Source of truth for the live Metals candidate. The rules and allocations
-# mirror notebooks/backtest_mt.ipynb after the 2026-08-14 review.
+# Source of truth for the Metals production candidate. The rules and
+# allocations mirror the executed portfolio cells in
+# notebooks/backtest_mt.ipynb after the 2026-08-23 review.
 METALS_SLEEVE_CONFIG: dict[str, MetalsSleeveConfig] = {
     "hg_gc_gap_gc_carry_iron": MetalsSleeveConfig(
-        weight=0.10,
+        weight=0.15,
         tickers=("BHP", "RIO", "VALE", "FSUGY"),
         internal_weights={"BHP": 0.40, "RIO": 0.30, "VALE": 0.20, "FSUGY": 0.10},
         signal_rule="dual_feature_hysteresis",
@@ -69,7 +71,7 @@ METALS_SLEEVE_CONFIG: dict[str, MetalsSleeveConfig] = {
         },
     ),
     "sco_vol_gc_hg_accel_miners": MetalsSleeveConfig(
-        weight=0.35,
+        weight=0.25,
         tickers=("BHP", "RIO", "VALE", "SCCO"),
         internal_weights={"BHP": 0.30, "RIO": 0.40, "VALE": 0.10, "SCCO": 0.20},
         signal_rule="sco_vol_gc_hg_combo",
@@ -91,7 +93,7 @@ METALS_SLEEVE_CONFIG: dict[str, MetalsSleeveConfig] = {
         },
     ),
     "sco_specialty_alloys": MetalsSleeveConfig(
-        weight=0.20,
+        weight=0.10,
         tickers=("ATI", "CRS", "HWM"),
         internal_weights={"ATI": 0.40, "CRS": 0.40, "HWM": 0.20},
         signal_rule="sco_specialty_alloys_hysteresis",
@@ -105,8 +107,26 @@ METALS_SLEEVE_CONFIG: dict[str, MetalsSleeveConfig] = {
             "long_vol_exit": 0.0,
         },
     ),
+    "sco_vol_miners": MetalsSleeveConfig(
+        weight=0.10,
+        tickers=("BHP", "RIO", "VALE", "SCCO"),
+        internal_weights={"BHP": 0.30, "RIO": 0.30, "VALE": 0.20, "SCCO": 0.20},
+        signal_rule="sco_vol_regime_pulse",
+        signal_ticker="BHP",
+        feature="M0_ret_std_20",
+        feature_symbol="SCO",
+        # The executed notebook portfolio uses a two-session fixed hold.
+        hold_days=2,
+        params={
+            "threshold": 0.70,
+            "side_mult": 1.0,
+            "vol_quantile_window": 504,
+            "vol_quantile_min_periods": 252,
+            "vol_diff_days": 20,
+        },
+    ),
     "copper_miner": MetalsSleeveConfig(
-        weight=0.20,
+        weight=0.15,
         tickers=("SCCO",),
         internal_weights={"SCCO": 1.0},
         signal_rule="copper_energy_terms_of_trade",
@@ -116,16 +136,14 @@ METALS_SLEEVE_CONFIG: dict[str, MetalsSleeveConfig] = {
         params={"threshold_multiple": 0.20, "signal_smoothing": 2},
     ),
     "miners": MetalsSleeveConfig(
-        weight=0.15,
+        weight=0.25,
         tickers=("VALE", "BHP", "RIO", "SCCO", "FSUGY"),
-        # The exploratory notebook previously summed to 1.10. Production is
-        # normalized so a 15% sleeve is exactly a 15% sleeve.
         internal_weights={
-            "VALE": 1.0 / 11.0,
-            "BHP": 3.0 / 11.0,
-            "RIO": 3.0 / 11.0,
-            "SCCO": 1.0 / 11.0,
-            "FSUGY": 3.0 / 11.0,
+            "VALE": 0.10,
+            "BHP": 0.30,
+            "RIO": 0.20,
+            "SCCO": 0.20,
+            "FSUGY": 0.20,
         },
         signal_rule="persistent_binary",
         signal_ticker="BHP",
@@ -290,6 +308,26 @@ def sco_vol_accel_hysteresis(
     state["long_leg"] = long_leg.ffill().fillna(0.0)
     state["short_leg"] = short_leg.ffill().fillna(0.0)
     state["signal"] = state["long_leg"] + state["short_leg"]
+    return state["signal"], state
+
+
+def sco_vol_regime_pulse(
+    sco_vol: pd.Series,
+    params: Mapping[str, float | int | str],
+) -> tuple[pd.Series, pd.DataFrame]:
+    """Build the notebook's low-level, rising-volatility SCO entry pulse."""
+    vol = pd.to_numeric(sco_vol, errors="coerce").ffill().sort_index()
+    state = pd.DataFrame(index=vol.index)
+    state["sco_vol"] = vol
+    state["vol_quantile"] = vol.rolling(
+        int(params["vol_quantile_window"]),
+        min_periods=int(params["vol_quantile_min_periods"]),
+    ).quantile(float(params["threshold"])).shift(1)
+    state["vol_diff"] = vol.diff(int(params["vol_diff_days"]))
+    state["signal"] = (
+        (state["sco_vol"] < state["vol_quantile"])
+        & (state["vol_diff"] > 0.0)
+    ).astype(float) * float(params["side_mult"])
     return state["signal"], state
 
 
@@ -580,14 +618,21 @@ def load_signal_bundle(
     if carry_dir.name != "carry_data_2":
         raise ValueError(f"Metals live targets require carry_data_2: {carry_dir}")
     sco_carry_path = carry_dir / "SCO.csv"
-    sco_carry = pd.read_csv(sco_carry_path, usecols=["date", SCO_CURVE_VOL_FEATURE])
-    sco_carry["date"] = pd.to_datetime(sco_carry["date"], errors="coerce")
-    sco_carry[SCO_CURVE_VOL_FEATURE] = pd.to_numeric(
-        sco_carry[SCO_CURVE_VOL_FEATURE], errors="coerce"
+    sco_carry = pd.read_csv(
+        sco_carry_path,
+        usecols=["date", SCO_CURVE_VOL_FEATURE, SCO_PULSE_VOL_FEATURE],
     )
-    sco_curve_vol = sco_carry.dropna(subset=["date"]).sort_values("date").drop_duplicates(
-        "date", keep="last"
-    ).set_index("date")[SCO_CURVE_VOL_FEATURE]
+    sco_carry["date"] = pd.to_datetime(sco_carry["date"], errors="coerce")
+    for column in (SCO_CURVE_VOL_FEATURE, SCO_PULSE_VOL_FEATURE):
+        sco_carry[column] = pd.to_numeric(sco_carry[column], errors="coerce")
+    sco_carry = (
+        sco_carry.dropna(subset=["date"])
+        .sort_values("date")
+        .drop_duplicates("date", keep="last")
+        .set_index("date")
+    )
+    sco_curve_vol = sco_carry[SCO_CURVE_VOL_FEATURE]
+    sco_pulse_vol = sco_carry[SCO_PULSE_VOL_FEATURE]
 
     gap_cfg = config["hg_gc_gap_gc_carry_iron"]
     gap_signal, gap_diag = dual_feature_hysteresis(
@@ -607,6 +652,11 @@ def load_signal_bundle(
         _feature(sco, alloy_cfg.signal_ticker, SCO_DRAWDOWN_FEATURE),
         _feature(sco, alloy_cfg.signal_ticker, SCO_VOL_FEATURE),
         alloy_cfg.params,
+    )
+    pulse_cfg = config["sco_vol_miners"]
+    pulse_signal, pulse_diag = sco_vol_regime_pulse(
+        sco_pulse_vol,
+        pulse_cfg.params,
     )
     miner_cfg = config["miners"]
     miner_signal, miner_diag = persistent_binary(
@@ -628,6 +678,7 @@ def load_signal_bundle(
         "hg_gc_gap_gc_carry_iron": gap_signal,
         "sco_vol_gc_hg_accel_miners": vol_signal,
         "sco_specialty_alloys": alloy_signal,
+        "sco_vol_miners": pulse_signal,
         "copper_miner": copper_signal,
         "miners": miner_signal,
     }
@@ -635,6 +686,7 @@ def load_signal_bundle(
         "hg_gc_gap_gc_carry_iron": gap_diag,
         "sco_vol_gc_hg_accel_miners": vol_diag,
         "sco_specialty_alloys": alloy_diag,
+        "sco_vol_miners": pulse_diag,
         "copper_miner": copper_diag,
         "miners": miner_diag,
     }
@@ -667,6 +719,7 @@ def load_signal_bundle(
             SCO_VOL_FEATURE,
         ),
         "sco_curve_vol": _latest_valid_date(sco_curve_vol, SCO_CURVE_VOL_FEATURE),
+        "sco_ret_std_20": _latest_valid_date(sco_pulse_vol, SCO_PULSE_VOL_FEATURE),
         "copper_hg_cl_ratio": _latest_valid_date(
             copper_diag["hg_cl_ratio"], "copper hg/cl ratio"
         ),
