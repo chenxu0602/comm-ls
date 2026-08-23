@@ -61,6 +61,7 @@ class CarryBuildConfig:
     oi_staleness_sessions: int = 5
     roll_confirmation_observations: int = 2
     roll_policy: str = "confirmed"
+    first_fresh_lead_max_dte_days: int = 30
     fast_roll_fallback_window_days: int = 20
     fast_roll_min_history: int = 12
     fast_roll_mad_multiplier: float = 2.0
@@ -640,6 +641,7 @@ def select_front_contracts(
     initialize_from_nearest: bool = False,
     stepwise: bool = True,
     roll_policy: str = "confirmed",
+    first_fresh_lead_max_dte_days: int = 30,
     fast_roll_fallback_window_days: int = 20,
     fast_roll_min_history: int = 12,
     fast_roll_mad_multiplier: float = 2.0,
@@ -647,7 +649,7 @@ def select_front_contracts(
     return_diagnostics: bool = False,
 ) -> pd.Series | tuple[pd.Series, pd.DataFrame]:
     """Select a no-lookahead, monotone front chain with roll hysteresis."""
-    if roll_policy not in {"confirmed", "adaptive-fast"}:
+    if roll_policy not in {"confirmed", "adaptive-fast", "first-fresh-lead"}:
         raise ValueError(f"Unsupported roll_policy: {roll_policy!r}")
     allowed = set(allowed_months or _eligible_months(symbol))
     working = panel.loc[
@@ -758,6 +760,19 @@ def select_front_contracts(
 
         use_oi = comparison["open_interest"].notna().any()
         field = "open_interest" if use_oi else "volume"
+        if roll_policy == "first-fresh-lead" and len(comparison) >= 2:
+            # The early-roll rule must use two comparable, exact-date activity
+            # observations. Prefer OI only when it is fresh for both contracts;
+            # otherwise fall back to fresh volume for both. If neither pair is
+            # fresh, retain the ordinary field so the two-observation fallback
+            # can still operate without accepting a stale first lead.
+            for fresh_field in ("open_interest", "volume"):
+                if comparison[fresh_field].notna().all() and all(
+                    _activity_is_fresh(row, fresh_field, date)
+                    for _, row in comparison.iterrows()
+                ):
+                    field = fresh_field
+                    break
         ranked = comparison.loc[comparison[field].notna()].sort_values(
             [field, "sort_key"], ascending=[False, True], kind="mergesort"
         )
@@ -833,6 +848,12 @@ def select_front_contracts(
                 and primary_fresh
                 and ((volume_agrees and oi_agrees) or strong_primary)
             )
+            first_fresh_lead = bool(
+                roll_policy == "first-fresh-lead"
+                and primary_fresh
+                and dte is not None
+                and 0 <= dte <= first_fresh_lead_max_dte_days
+            )
 
             diagnostics.loc[date, "M0_roll_candidate"] = leader
             diagnostics.loc[date, "M0_roll_signal_count"] = confirmations
@@ -843,13 +864,17 @@ def select_front_contracts(
             diagnostics.loc[date, "M0_roll_expected_dte_mad"] = expected_mad
 
             confirmed = confirmations >= confirmation_observations
-            if adaptive_fast or confirmed:
+            if first_fresh_lead or adaptive_fast or confirmed:
                 if candidate_start_dte is not None:
                     roll_lead_dte_history.append(candidate_start_dte)
                 current = leader
-                diagnostics.loc[date, "M0_roll_reason"] = (
-                    "adaptive_fast_roll" if adaptive_fast and not confirmed else "confirmed_roll"
-                )
+                if first_fresh_lead and not confirmed:
+                    reason = "first_fresh_lead_roll"
+                elif adaptive_fast and not confirmed:
+                    reason = "adaptive_fast_roll"
+                else:
+                    reason = "confirmed_roll"
+                diagnostics.loc[date, "M0_roll_reason"] = reason
                 candidate = None
                 confirmations = 0
                 last_evidence = None
@@ -923,6 +948,44 @@ def _extract_chain_fields(
         "maturity",
     ]
     merged = selector.merge(panel[fields], on=["date", "contract"], how="left")
+
+    # Some source files retain an exchange-closed weekday as a dated row even
+    # though no contract received a new settlement (Good Friday, observed US
+    # holidays, and similar closures).  Such a row represents an unchanged
+    # curve state, not unavailable information.  Preserve that state by
+    # carrying the prior selected-contract settlement forward and recording a
+    # zero contract return.
+    #
+    # This is intentionally narrower than a general forward-fill:
+    #   * every contract in the panel must lack a valid settlement that day;
+    #   * a later valid settlement date must already exist, so the latest
+    #     partially updated row remains missing and fails closed downstream;
+    #   * the selected chain contract must be unchanged from the prior row.
+    panel_settle = pd.to_numeric(panel["settle"], errors="coerce")
+    date_has_settle = panel_settle.gt(0).groupby(panel["date"]).any().sort_index()
+    valid_dates = date_has_settle.index[date_has_settle]
+    if len(valid_dates):
+        last_valid_date = valid_dates.max()
+        closed_dates = date_has_settle.index[
+            ~date_has_settle & (date_has_settle.index < last_valid_date)
+        ]
+        settle = pd.to_numeric(merged["settle"], errors="coerce")
+        selected_contract = merged["contract"].astype("string")
+        prior_settle = settle.where(settle.gt(0)).groupby(
+            selected_contract, observed=True
+        ).ffill()
+        fill_closed = (
+            merged["date"].isin(closed_dates)
+            & settle.isna()
+            & prior_settle.gt(0)
+            & selected_contract.eq(selected_contract.shift(1)).fillna(False)
+        )
+        if fill_closed.any():
+            merged.loc[fill_closed, "settle"] = prior_settle.loc[fill_closed]
+            merged.loc[fill_closed, "settle_source"] = "prior_valid_settlement"
+            merged.loc[fill_closed, "settle_kind"] = "closed_session_ffill"
+            merged.loc[fill_closed, "contract_ret"] = 0.0
+
     merged.index = contracts.index
     return merged.rename(
         columns={
@@ -1121,6 +1184,7 @@ def build_carry_frame(config: CarryBuildConfig) -> pd.DataFrame:
         initialize_from_nearest=symbol in MONTHLY_STEPWISE_FRONT_SYMBOLS,
         stepwise=symbol in MONTHLY_STEPWISE_FRONT_SYMBOLS,
         roll_policy=config.roll_policy,
+        first_fresh_lead_max_dte_days=config.first_fresh_lead_max_dte_days,
         fast_roll_fallback_window_days=config.fast_roll_fallback_window_days,
         fast_roll_min_history=config.fast_roll_min_history,
         fast_roll_mad_multiplier=config.fast_roll_mad_multiplier,

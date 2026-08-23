@@ -166,13 +166,15 @@ def build_parser() -> argparse.ArgumentParser:
     carry_data.add_argument("--roll-confirmation-observations", type=int, default=2)
     carry_data.add_argument(
         "--roll-policy",
-        choices=("confirmed", "adaptive-fast"),
+        choices=("confirmed", "adaptive-fast", "first-fresh-lead"),
         default="confirmed",
         help=(
-            "Front-contract roll policy. adaptive-fast accepts one fresh, strongly "
-            "corroborated next-contract lead inside the expected roll window."
+            "Front-contract roll policy. first-fresh-lead accepts the first exact-date "
+            "next-contract activity lead inside a fixed DTE window; adaptive-fast "
+            "requires stronger corroboration inside its learned window."
         ),
     )
+    carry_data.add_argument("--first-fresh-lead-max-dte-days", type=int, default=30)
     carry_data.add_argument("--fast-roll-fallback-window-days", type=int, default=20)
     carry_data.add_argument("--fast-roll-min-history", type=int, default=12)
     carry_data.add_argument("--fast-roll-mad-multiplier", type=float, default=2.0)
@@ -2170,6 +2172,7 @@ def main() -> None:
                 oi_staleness_sessions=args.oi_staleness_sessions,
                 roll_confirmation_observations=args.roll_confirmation_observations,
                 roll_policy=args.roll_policy,
+                first_fresh_lead_max_dte_days=args.first_fresh_lead_max_dte_days,
                 fast_roll_fallback_window_days=args.fast_roll_fallback_window_days,
                 fast_roll_min_history=args.fast_roll_min_history,
                 fast_roll_mad_multiplier=args.fast_roll_mad_multiplier,

@@ -363,22 +363,42 @@ def _read_contract(path: Path) -> pd.DataFrame:
 def _extend_hg_cl_ratio_from_carry(
     historical: pd.DataFrame,
     carry_dir: Path,
+    *,
+    allow_canonical_carry: bool = False,
 ) -> pd.DataFrame:
     """Extend the notebook's contract-matched ratio with merged live settles."""
-    if carry_dir.name != "carry_data_2":
+    allowed_names = {"carry_data_2"}
+    if allow_canonical_carry:
+        allowed_names.add("carry_data")
+    if carry_dir.name not in allowed_names:
         raise ValueError(f"Metals live targets require carry_data_2: {carry_dir}")
     hg = pd.read_csv(carry_dir / "HG.csv", low_memory=False)
     cl = pd.read_csv(carry_dir / "CL.csv", low_memory=False)
     hg_columns = ["date", "M0_con", "M0_settle"]
     cl_months = "HMUZ"
-    cl_columns = ["date", *[item for month in cl_months for item in (f"{month}_con", f"{month}_settle")]]
+    calendar_pairs = [(f"{month}_con", f"{month}_settle") for month in cl_months]
+    chain_pairs = [(f"M{number}_con", f"M{number}_settle") for number in range(3)]
+    cl_pairs = (
+        calendar_pairs
+        if all(column in cl.columns for pair in calendar_pairs for column in pair)
+        else chain_pairs
+    )
+    cl_columns = ["date", *[column for pair in cl_pairs for column in pair]]
     hg = hg[hg_columns].copy()
     cl = cl[cl_columns].copy()
     for frame in (hg, cl):
         frame["date"] = pd.to_datetime(frame["date"], errors="coerce")
     hg["M0_settle"] = pd.to_numeric(hg["M0_settle"], errors="coerce")
-    for month in cl_months:
-        cl[f"{month}_settle"] = pd.to_numeric(cl[f"{month}_settle"], errors="coerce")
+    for _, settle_column in cl_pairs:
+        cl[settle_column] = pd.to_numeric(cl[settle_column], errors="coerce")
+    if cl_pairs == chain_pairs:
+        rename = {
+            column: f"CL_{column}"
+            for pair in cl_pairs
+            for column in pair
+        }
+        cl = cl.rename(columns=rename)
+        cl_pairs = [(rename[contract], rename[settle]) for contract, settle in cl_pairs]
     live = hg.merge(cl, on="date", how="inner").sort_values("date")
     live = live[live["date"] > historical.index.max()]
 
@@ -388,9 +408,9 @@ def _extend_hg_cl_ratio_from_carry(
         if not hg_contract or hg_contract == "nan" or not np.isfinite(row.M0_settle):
             continue
         candidates: list[tuple[str, float]] = []
-        for month in cl_months:
-            contract = str(getattr(row, f"{month}_con"))
-            settle = getattr(row, f"{month}_settle")
+        for contract_column, settle_column in cl_pairs:
+            contract = str(getattr(row, contract_column))
+            settle = getattr(row, settle_column)
             if contract and contract != "nan" and np.isfinite(settle):
                 candidates.append((contract, float(settle)))
         if not candidates:
@@ -418,6 +438,8 @@ def _extend_hg_cl_ratio_from_carry(
 def build_hg_cl_ratio(
     commodity_dir: Path = COMMODITY_DIR,
     carry_dir: Path | None = None,
+    *,
+    allow_canonical_carry: bool = False,
 ) -> pd.DataFrame:
     hg_dir = commodity_dir / "HG"
     cl_dir = commodity_dir / "CL"
@@ -473,7 +495,11 @@ def build_hg_cl_ratio(
     result = result[~result.index.duplicated(keep="last")]
     result["ratio"] = result["hg"].ffill() / result["cl"].ffill()
     if carry_dir is not None:
-        result = _extend_hg_cl_ratio_from_carry(result, carry_dir)
+        result = _extend_hg_cl_ratio_from_carry(
+            result,
+            carry_dir,
+            allow_canonical_carry=allow_canonical_carry,
+        )
     return result
 
 

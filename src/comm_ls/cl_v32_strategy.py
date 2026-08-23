@@ -558,12 +558,17 @@ def build_stock_weights(
     config: dict[str, SleeveConfig],
     availability: pd.DataFrame | None = None,
     max_single_name_weight: float | None = CL_V32_MAX_SINGLE_NAME_WEIGHT,
+    position_overrides: dict[str, pd.Series] | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Build capped notebook-equivalent ticker weights on a shared market calendar."""
     validate_config(config)
     if max_single_name_weight is not None and max_single_name_weight <= 0:
         raise ValueError("max_single_name_weight must be positive or None")
     stock_weights: dict[str, pd.Series] = {}
+    position_overrides = position_overrides or {}
+    unknown_overrides = sorted(set(position_overrides).difference(config))
+    if unknown_overrides:
+        raise KeyError(f"Position overrides reference unknown sleeves: {unknown_overrides}")
 
     for sleeve, cfg in config.items():
         required_features = list(sleeve_feature_names(cfg))
@@ -571,8 +576,12 @@ def build_stock_weights(
         if missing:
             raise KeyError(f"Missing features for {sleeve}: {missing}")
         for ticker in cfg.tickers:
-            present = None
-            if availability is not None and ticker in availability:
+            if sleeve in position_overrides:
+                ticker_pos = position_overrides[sleeve].reindex(features.index).fillna(0.0)
+                if availability is not None and ticker in availability:
+                    present = availability[ticker].reindex(features.index).fillna(False).astype(bool)
+                    ticker_pos = ticker_pos.where(present, 0.0)
+            elif availability is not None and ticker in availability:
                 present = availability[ticker].reindex(features.index).fillna(False).astype(bool)
                 present_dates = present[present].index
                 if present_dates.empty:
