@@ -12,9 +12,10 @@ from comm_ls.cl_v32_strategy import fixed_hold_position
 
 
 METALS_MAX_SINGLE_NAME_WEIGHT = 0.12
-METALS_CACHE_PATH = Path("data/cache/feature_return/METALS-multi_return_2.parquet")
-GC_CACHE_PATH = Path("data/cache/feature_return/GC-multi_return_2.parquet")
-SCO_CACHE_PATH = Path("data/cache/feature_return/SCO-multi_return_2.parquet")
+METALS_FEATURE_ALIGNMENT_MODE = "stock_observation_asof"
+METALS_CACHE_PATH = Path("data/cache/feature_return_observation_v1/METALS-multi_return_2.parquet")
+GC_CACHE_PATH = Path("data/cache/feature_return_observation_v1/GC-multi_return_2.parquet")
+SCO_CACHE_PATH = Path("data/cache/feature_return_observation_v1/SCO-multi_return_2.parquet")
 SHADOW_CARRY_DIR = Path("data/comm/carry_data_2")
 COMMODITY_DIR = Path("data/comm")
 PERSISTENT_AUXILIARY_INPUTS = frozenset({"sco_curve_vol"})
@@ -192,10 +193,33 @@ def require_shadow_cache(path: Path) -> None:
         raise FileNotFoundError(path)
 
 
-def _load_cache(path: Path, columns: list[str], tickers: set[str]) -> pd.DataFrame:
+def _load_cache(
+    path: Path,
+    columns: list[str],
+    tickers: set[str],
+    *,
+    required_alignment_mode: str | None = None,
+) -> pd.DataFrame:
     require_shadow_cache(path)
-    required = ["date", "ticker", *columns]
-    frame = pd.read_parquet(path, columns=required)
+    metadata = ["feature_alignment_mode"] if required_alignment_mode else []
+    required = ["date", "ticker", *columns, *metadata]
+    try:
+        frame = pd.read_parquet(path, columns=required)
+    except Exception as exc:
+        if required_alignment_mode:
+            raise ValueError(
+                f"{path} must expose feature_alignment_mode={required_alignment_mode!r}"
+            ) from exc
+        raise
+    if required_alignment_mode:
+        actual_modes = sorted(
+            frame["feature_alignment_mode"].dropna().astype(str).unique().tolist()
+        )
+        if actual_modes != [required_alignment_mode]:
+            raise ValueError(
+                f"{path} requires feature_alignment_mode={required_alignment_mode!r}; "
+                f"found {actual_modes}"
+            )
     frame = frame[frame["ticker"].astype(str).isin(tickers)].copy()
     if frame.empty:
         raise ValueError(f"No configured Metals tickers found in {path}")
@@ -602,18 +626,26 @@ def load_signal_bundle(
     carry_dir: Path = SHADOW_CARRY_DIR,
     commodity_dir: Path = COMMODITY_DIR,
     config: Mapping[str, MetalsSleeveConfig] = METALS_SLEEVE_CONFIG,
+    required_alignment_mode: str | None = None,
 ) -> MetalsSignalBundle:
     validate_config(config)
     metals = _load_cache(
         metals_cache,
         [HG_GC_GAP_FEATURE, GC_HG_ACCEL_FEATURE],
         {"BHP", "SCCO"},
+        required_alignment_mode=required_alignment_mode,
     )
-    gc = _load_cache(gc_cache, [GC_CARRY_FEATURE], {"BHP"})
+    gc = _load_cache(
+        gc_cache,
+        [GC_CARRY_FEATURE],
+        {"BHP"},
+        required_alignment_mode=required_alignment_mode,
+    )
     sco = _load_cache(
         sco_cache,
         [SCO_RETURN_FEATURE, SCO_DRAWDOWN_FEATURE, SCO_VOL_FEATURE],
         {"ATI"},
+        required_alignment_mode=required_alignment_mode,
     )
     if carry_dir.name != "carry_data_2":
         raise ValueError(f"Metals live targets require carry_data_2: {carry_dir}")

@@ -585,6 +585,7 @@ def build_daily_feature_return_cache(
     min_feature_observations: int = 126,
     min_observations: int = 126,
     include_prestandardized: bool = False,
+    alignment_mode: str = "arrival_session",
 ) -> pd.DataFrame:
     commodity = commodity.upper().strip()
     horizons = horizons or DEFAULT_DISCOVERY_HORIZONS
@@ -618,6 +619,7 @@ def build_daily_feature_return_cache(
         commodity_features=signals,
         stock_dates=stock_dates,
         feature_columns=feature_columns,
+        alignment_mode=alignment_mode,
     )
     aligned = aligned.rename(columns={"date": "commodity_feature_date", "arrival": "commodity_arrival"})
     standardized_features: dict[str, pd.Series] = {}
@@ -683,6 +685,10 @@ def build_daily_feature_return_cache(
 
     cache = cache.merge(z, left_on="date", right_on="signal_date", how="left").drop(columns=["signal_date"]).copy()
     cache.insert(0, "commodity", commodity)
+    cache["feature_alignment_mode"] = alignment_mode
+    cache["commodity_feature_date_matches_stock_date"] = (
+        cache["commodity_feature_date"].eq(cache["date"]).where(cache["commodity_feature_date"].notna())
+    )
     cache["feature_preset"] = feature_preset
     cache["feature_z_window"] = feature_z_window
     cache["min_feature_observations"] = min_feature_observations
@@ -702,6 +708,7 @@ def build_daily_feature_return_cache_from_paths(
     min_feature_observations: int = 126,
     min_observations: int = 126,
     include_prestandardized: bool = False,
+    alignment_mode: str = "arrival_session",
 ) -> pd.DataFrame:
     cache = build_daily_feature_return_cache(
         commodity_signals=load_frame(commodity_signals_path),
@@ -715,6 +722,7 @@ def build_daily_feature_return_cache_from_paths(
         min_feature_observations=min_feature_observations,
         min_observations=min_observations,
         include_prestandardized=include_prestandardized,
+        alignment_mode=alignment_mode,
     )
     _write_frame(cache, output_path)
     return cache

@@ -340,6 +340,15 @@ def build_parser() -> argparse.ArgumentParser:
     feature_return_cache.add_argument("--min-observations", type=int, default=126)
     feature_return_cache.add_argument("--include-prestandardized", action="store_true")
     feature_return_cache.add_argument("--return-column", action="append", default=None)
+    feature_return_cache.add_argument(
+        "--alignment-mode",
+        choices=["arrival_session", "stock_observation_asof"],
+        default="arrival_session",
+        help=(
+            "Map commodity observations by their first eligible arrival session (production default), "
+            "or as-of their trading date on the stock calendar (isolated research shadow)."
+        ),
+    )
 
     quarterly_matrix = subparsers.add_parser("build-quarterly-stock-feature-matrix")
     quarterly_matrix.add_argument("--commodity", required=True)
@@ -2416,7 +2425,7 @@ def main() -> None:
         )
         print(
             f"  feature_preset={args.feature_preset}, explicit_features={len(args.feature or [])}, "
-            f"returns={','.join(return_columns)}, output={output}"
+            f"returns={','.join(return_columns)}, alignment_mode={args.alignment_mode}, output={output}"
         )
         cache = build_daily_feature_return_cache_from_paths(
             commodity_signals_path=args.commodity_signals,
@@ -2431,6 +2440,7 @@ def main() -> None:
             min_observations=args.min_observations,
             include_prestandardized=args.include_prestandardized,
             return_column=return_columns,
+            alignment_mode=args.alignment_mode,
         )
         feature_z_cols = [col for col in cache.columns if col.startswith("feature_z__")]
         brent_wti_cols = [col for col in feature_z_cols if "brent_wti" in col or "brent_minus_wti" in col]

@@ -81,11 +81,36 @@ def _map_features_to_signal_dates(
     commodity_features: pd.DataFrame,
     stock_dates: pd.Series,
     feature_columns: list[str],
+    alignment_mode: str = "arrival_session",
 ) -> pd.DataFrame:
     stock_dates = pd.Series(pd.to_datetime(stock_dates, utc=False).sort_values().unique())
     signals = commodity_features[["date", "arrival", "symbol", *feature_columns]].copy()
     signals["date"] = pd.to_datetime(signals["date"], utc=False)
     signals["arrival"] = pd.to_datetime(signals["arrival"], utc=False)
+
+    if alignment_mode == "stock_observation_asof":
+        # Research shadow convention: the stock calendar is authoritative.  A
+        # stock date T receives the latest futures observation whose trading
+        # date is <= T.  ``arrival`` remains attached for availability audits;
+        # it does not determine the cache row date in this mode.
+        signals = signals.sort_values(["date", "arrival"]).drop_duplicates("date", keep="last")
+        stock_calendar = pd.DataFrame({"signal_date": stock_dates})
+        aligned = pd.merge_asof(
+            stock_calendar.sort_values("signal_date"),
+            signals.sort_values("date"),
+            left_on="signal_date",
+            right_on="date",
+            direction="backward",
+            allow_exact_matches=True,
+        )
+        return aligned.loc[aligned["date"].notna()].copy()
+
+    if alignment_mode != "arrival_session":
+        raise ValueError(
+            "alignment_mode must be 'arrival_session' or 'stock_observation_asof', "
+            f"got {alignment_mode!r}"
+        )
+
     arrival_days = signals["arrival"].dt.normalize().to_numpy(dtype="datetime64[ns]")
     calendar = stock_dates.to_numpy(dtype="datetime64[ns]")
     indexer = np.searchsorted(calendar, arrival_days, side="left")
