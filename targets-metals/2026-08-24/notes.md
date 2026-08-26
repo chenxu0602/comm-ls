@@ -10,9 +10,15 @@
   low-volatility gate, positive 20-observation change and a two-session hold.
 - Aggregate single-name cap increased from 10% to 12%.
 - Research return remains `residual_return_mktsec_w12m`.
+- For the initial 2026-08-24 deployment, the operator explicitly regenerated
+  the child package with `--max-daily-turnover-weight 1.0` so all rounded
+  Metals stock targets can be implemented alongside the full hedge. This is a
+  one-day override; the normal prospective stock-turnover cap remains 40%
+  unless explicitly changed.
 - When combined with CL v4.2 in the shared IB account, do not trade standalone
-  order files. Preserve each strategy's sleeve-aware rounding and child cap,
-  sum `rounded_trade_shares` by ticker, and apply the account-level cap on USD
-  20,000. If constrained, CL has implementation priority over new Metals risk.
+  order files. Preserve each strategy's sleeve-aware rounding, sum
+  `rounded_trade_shares` by ticker, and execute only the account-netted
+  combined package on USD 20,000. If constrained, CL has implementation
+  priority over new Metals risk.
 - The complete operating and attribution procedure is in
   `docs/shared_account_cl_metals_workflow.md`.

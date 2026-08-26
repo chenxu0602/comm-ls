@@ -1843,7 +1843,7 @@ def build_commodity_signal_frame(
         m0_log_ret_v2 = pd.to_numeric(m0_ret, errors="coerce")
         front_log_ret_v2 = {
             periods: _rolling_observed_sum(m0_log_ret_v2, periods)
-            for periods in (5, 21, 42, 63)
+            for periods in (5, 10, 21, 30, 42, 63)
         }
         front_log_ret_1d = np.log(front.where(front > 0)).diff()
         is_contango = g["contango"] > g["backwardation"]
@@ -1898,14 +1898,18 @@ def build_commodity_signal_frame(
                 "ret_42d": front.pct_change(42),
                 "ret_63d": front.pct_change(63),
                 "ret_5d_v2": np.expm1(front_log_ret_v2[5]),
+                "ret_10d_v2": np.expm1(front_log_ret_v2[10]),
                 "ret_21d_v2": np.expm1(front_log_ret_v2[21]),
+                "ret_30d_v2": np.expm1(front_log_ret_v2[30]),
                 "ret_42d_v2": np.expm1(front_log_ret_v2[42]),
                 "ret_63d_v2": np.expm1(front_log_ret_v2[63]),
                 "front_log_ret_5d": np.log(front.where(front > 0)).diff(5),
                 "front_log_ret_21d": np.log(front.where(front > 0)).diff(21),
                 "front_log_ret_63d": np.log(front.where(front > 0)).diff(63),
                 "front_log_ret_5d_v2": front_log_ret_v2[5],
+                "front_log_ret_10d_v2": front_log_ret_v2[10],
                 "front_log_ret_21d_v2": front_log_ret_v2[21],
+                "front_log_ret_30d_v2": front_log_ret_v2[30],
                 "front_log_ret_42d_v2": front_log_ret_v2[42],
                 "front_log_ret_63d_v2": front_log_ret_v2[63],
                 "ret_accel_21d_vs_63d": front.pct_change(21) - front.pct_change(63) / 3.0,
@@ -1983,7 +1987,10 @@ def build_commodity_signal_frame(
         out["volume_shock_63d"] = out["volume_surge_63d"]
         out["oi_shock_63d"] = out["oi_surge_63d"]
         out["carry_chg_5d"] = out["carry"].diff(5)
+        out["carry_chg_10d"] = out["carry"].diff(10)
+        out["carry_chg_20d"] = out["carry"].diff(20)
         out["carry_chg_21d"] = out["carry"].diff(21)
+        out["carry_chg_30d"] = out["carry"].diff(30)
         out["carry_z_252d"] = _rolling_z(out["carry"])
         out["carry_pctile_252d"] = _rolling_pctile(out["carry"])
         out["front_second_spread_z_252d"] = _rolling_z(out["front_second_spread"])
