@@ -56,6 +56,7 @@ CORE_PRICE_MOMENTUM_FEATURES = [
     "ret_5d_v2",
     "front_log_ret_10d_v2",
     "ret_10d_v2",
+    "front_log_ret_20d_v2",
     "ret_21d_v2",
     "front_log_ret_30d_v2",
     "ret_30d_v2",

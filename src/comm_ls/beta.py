@@ -54,6 +54,17 @@ DEFAULT_PROCESSED_BETA_VARIATIONS = {
         "beta_smoothing": 0.0,
         "hedge_ratio_scale": 1.0,
     },
+    "sec_w12m": {
+        "mode": "sector_only",
+        "beta_return_frequency": "weekly",
+        "beta_update_frequency": "monthly",
+        "beta_lookback_months": 12,
+        "min_beta_observations": 26,
+        "beta_weighting": "exponential",
+        "beta_half_life_months": 3.0,
+        "beta_smoothing": 0.0,
+        "hedge_ratio_scale": 1.0,
+    },
 }
 DEFAULT_PRIMARY_PROCESSED_BETA_VARIATION = "mktsec_w12m"
 DEFAULT_COMMODITY_BETA_SYMBOLS = ["CL", "HG", "GC", "SI", "LC", "IS", "PS", "PD", "PT"]
@@ -886,15 +897,30 @@ def build_equity_processed_dataset(
             beta_return_frequency = str(cfg["beta_return_frequency"])
             beta_matrix = beta_return_matrices[beta_return_frequency]
             mode = str(cfg["mode"])
-            beta_sector_ticker = market_ticker if mode == "market_only" else sector_ticker
-            daily_sector = daily_returns[market_ticker] if mode == "market_only" else daily_returns[sector_ticker]
+            if mode == "market_only":
+                beta_market_ticker = market_ticker
+                beta_sector_ticker = market_ticker
+                daily_market = daily_returns[market_ticker]
+                daily_sector = daily_market
+            elif mode == "sector_only":
+                beta_market_ticker = sector_ticker
+                beta_sector_ticker = sector_ticker
+                daily_market = daily_returns[sector_ticker]
+                daily_sector = daily_market
+            elif mode == "market_sector":
+                beta_market_ticker = market_ticker
+                beta_sector_ticker = sector_ticker
+                daily_market = daily_returns[market_ticker]
+                daily_sector = daily_returns[sector_ticker]
+            else:
+                raise ValueError(f"Unknown processed beta mode: {mode}")
 
             calc = _monthly_or_daily_beta_pair(
                 daily_stock_ret=daily_returns[ticker],
-                daily_market_ret=daily_returns[market_ticker],
+                daily_market_ret=daily_market,
                 daily_sector_ret=daily_sector,
                 beta_stock_ret=beta_matrix[ticker],
-                beta_market_ret=beta_matrix[market_ticker],
+                beta_market_ret=beta_matrix[beta_market_ticker],
                 beta_sector_ret=beta_matrix[beta_sector_ticker],
                 lookback_observations=_lookback_observations(
                     beta_return_frequency=beta_return_frequency,
@@ -910,8 +936,15 @@ def build_equity_processed_dataset(
                 beta_smoothing=float(cfg["beta_smoothing"]),
                 hedge_ratio_scale=float(cfg["hedge_ratio_scale"]),
             )
-            base[f"market_beta_{variation}"] = calc["market_beta"].to_numpy()
-            base[f"sector_beta_{variation}"] = calc["sector_beta"].to_numpy()
+            if mode == "sector_only":
+                sector_beta = calc["market_beta"]
+                base[f"market_beta_{variation}"] = np.where(
+                    sector_beta.notna(), 0.0, np.nan
+                )
+                base[f"sector_beta_{variation}"] = sector_beta.to_numpy()
+            else:
+                base[f"market_beta_{variation}"] = calc["market_beta"].to_numpy()
+                base[f"sector_beta_{variation}"] = calc["sector_beta"].to_numpy()
             base[f"beta_observations_{variation}"] = calc["beta_observations"].to_numpy()
             base[f"beta_estimation_end_{variation}"] = calc["beta_estimation_end"].to_numpy()
             base[f"residual_return_{variation}"] = calc["residual_return"].to_numpy()

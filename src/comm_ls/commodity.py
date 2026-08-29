@@ -66,6 +66,14 @@ ACTIVE_CONTRACT_MONTHS_BY_SYMBOL = {
     "PD": ALL_CONTRACT_MONTHS,
     "PT": ALL_CONTRACT_MONTHS,
 }
+
+# CL and Brent second-year April/May contracts are typically much thinner than
+# the following June anchor.  Exclude only those deferred observations; the
+# same delivery months remain valid in the prompt year and as M0/M1/M2.
+THIN_SECOND_YEAR_DEFERRED_MONTHS_BY_SYMBOL = {
+    "CL": (4, 5),
+    "CO": (4, 5),
+}
 LIQUID_DEFERRED_MIN_MONTHS = 6
 NG_SUMMER_MONTHS = (4, 5, 6, 7, 8, 9, 10)
 NG_WINTER_MONTHS = (11, 12, 1, 2, 3)
@@ -234,7 +242,11 @@ def _liquid_deferred_contract(
     symbol: str,
     min_months: int = LIQUID_DEFERRED_MIN_MONTHS,
 ) -> pd.Series:
-    active_months = ACTIVE_CONTRACT_MONTHS_BY_SYMBOL.get(symbol.upper(), ALL_CONTRACT_MONTHS)
+    normalized_symbol = symbol.upper()
+    active_months = ACTIVE_CONTRACT_MONTHS_BY_SYMBOL.get(normalized_symbol, ALL_CONTRACT_MONTHS)
+    thin_second_year_months = THIN_SECOND_YEAR_DEFERRED_MONTHS_BY_SYMBOL.get(
+        normalized_symbol, ()
+    )
     front_month = _contract_month_start(front_contract)
     contracts: list[object] = []
 
@@ -248,6 +260,8 @@ def _liquid_deferred_contract(
         for year in range(target.year, target.year + 3):
             for month in active_months:
                 candidate = pd.Timestamp(year=year, month=month, day=1)
+                if year > value.year and month in thin_second_year_months:
+                    continue
                 if candidate >= target:
                     selected = _contract_for_year_month(year, month)
                     break
@@ -471,7 +485,18 @@ def _activity_deferred_contract(
             index=front_contract.index,
         )
 
-    candidates = market.merge(base[["date", "target_month"]], on="date", how="inner")
+    candidates = market.merge(
+        base[["date", "front_month", "target_month"]], on="date", how="inner"
+    )
+    thin_second_year_months = THIN_SECOND_YEAR_DEFERRED_MONTHS_BY_SYMBOL.get(
+        symbol.upper(), ()
+    )
+    if thin_second_year_months:
+        thin_second_year = (
+            candidates["contract_month"].dt.year.gt(candidates["front_month"].dt.year)
+            & candidates["contract_month"].dt.month.isin(thin_second_year_months)
+        )
+        candidates = candidates.loc[~thin_second_year]
     candidates = candidates[
         candidates["contract_month"].ge(candidates["target_month"])
         & pd.to_numeric(candidates["settle"], errors="coerce").gt(0)
@@ -1843,7 +1868,7 @@ def build_commodity_signal_frame(
         m0_log_ret_v2 = pd.to_numeric(m0_ret, errors="coerce")
         front_log_ret_v2 = {
             periods: _rolling_observed_sum(m0_log_ret_v2, periods)
-            for periods in (5, 10, 21, 30, 42, 63)
+            for periods in (5, 10, 20, 21, 30, 42, 63)
         }
         front_log_ret_1d = np.log(front.where(front > 0)).diff()
         is_contango = g["contango"] > g["backwardation"]
@@ -1908,6 +1933,7 @@ def build_commodity_signal_frame(
                 "front_log_ret_63d": np.log(front.where(front > 0)).diff(63),
                 "front_log_ret_5d_v2": front_log_ret_v2[5],
                 "front_log_ret_10d_v2": front_log_ret_v2[10],
+                "front_log_ret_20d_v2": front_log_ret_v2[20],
                 "front_log_ret_21d_v2": front_log_ret_v2[21],
                 "front_log_ret_30d_v2": front_log_ret_v2[30],
                 "front_log_ret_42d_v2": front_log_ret_v2[42],
