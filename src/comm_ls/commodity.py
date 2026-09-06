@@ -55,6 +55,10 @@ ACTIVE_CONTRACT_MONTHS_BY_SYMBOL = {
     "HG": (1, 3, 5, 7, 9, 12),
     "PA": (3, 6, 9, 12),
     "PL": (1, 4, 7, 10),
+    # ICE Coffee C has five primary delivery months: Mar/May/Jul/Sep/Dec.
+    # Register the schedule explicitly so generic deferred selection does not
+    # treat thin, non-listed calendar months as interchangeable with CL.
+    "KC": (3, 5, 7, 9, 12),
     # SGX 62% Fe CFR China iron ore futures list and trade every delivery
     # month. Keep SCO explicit here so deferred-contract selection does not
     # accidentally inherit the odd-month HG convention in cross-metal work.
@@ -278,8 +282,7 @@ def _normalize_contract_market_data(
     source_priority: int = 0,
     price_scale: float = 1.0,
 ) -> pd.DataFrame:
-    required = {"date", "px_settle", "px_last"}
-    if required.difference(df.columns):
+    if "date" not in df.columns or not {"px_settle", "px_last"}.intersection(df.columns):
         return pd.DataFrame(columns=["date", "contract", "settle", "volume", "open_interest", "source_priority"])
 
     out = df.copy()
@@ -291,8 +294,12 @@ def _normalize_contract_market_data(
     else:
         out["contract"] = contract.upper()
 
-    settle = pd.to_numeric(out["px_settle"], errors="coerce")
-    last = pd.to_numeric(out["px_last"], errors="coerce")
+    settle = pd.to_numeric(
+        out.get("px_settle", pd.Series(np.nan, index=out.index)), errors="coerce"
+    )
+    last = pd.to_numeric(
+        out.get("px_last", pd.Series(np.nan, index=out.index)), errors="coerce"
+    )
     out["settle"] = settle.fillna(last) * price_scale
     out["volume"] = pd.to_numeric(out["volume"], errors="coerce") if "volume" in out.columns else np.nan
     out["open_interest"] = pd.to_numeric(out["open int"], errors="coerce") if "open int" in out.columns else np.nan
@@ -753,7 +760,7 @@ def load_carry_file(path: Path) -> pd.DataFrame:
             f"first run: uv run python scripts/repair_legacy_carry_settlements.py "
             f"--symbol {symbol}. Otherwise rebuild it before building commodity signals: "
             f"uv run comm-ls build-carry-data --symbol {symbol} "
-            "--commodity-dir data/comm --output-dir data/comm/carry_data "
+            "--commodity-dir data/comm --output-dir data/comm/carry_data_2 "
             "--overwrite"
         )
     return df
@@ -777,7 +784,11 @@ def _load_contract_settles(
         path = symbol_dir / f"{contract}.csv"
         if not path.exists():
             continue
-        df = _read_contract_csv(path, usecols=["date", "px_settle", "px_last"])
+        # Historical files are not schema-uniform: some older contracts have
+        # only px_last, while others have only px_settle.  Read the validated
+        # row shape first and let normalization apply settlement-first pricing
+        # with a same-row last fallback.
+        df = _read_contract_csv(path)
         normalized = _normalize_contract_market_data(df, contract=contract, source_priority=0)
         if not normalized.empty:
             frames.append(normalized)
@@ -1900,7 +1911,21 @@ def build_commodity_signal_frame(
         volume_surge_63d = (
             g["total_volume"] / g["total_volume"].rolling(63, min_periods=21).median() - 1.0
         )
-        oi_surge_63d = g["total_oi"] / g["total_oi"].rolling(63, min_periods=21).median() - 1.0
+        oi_shocks = {
+            periods: (
+                g["total_oi"]
+                / g["total_oi"].rolling(periods, min_periods=min_periods).median()
+                - 1.0
+            )
+            for periods, min_periods in (
+                (10, 4),
+                (21, 7),
+                (30, 10),
+                (42, 14),
+                (63, 21),
+            )
+        }
+        oi_surge_63d = oi_shocks[63]
         front_price_high_features = _front_price_high_regime_features(front)
         front_price_low_features = _front_price_low_regime_features(front)
 
@@ -2011,7 +2036,8 @@ def build_commodity_signal_frame(
         out["term_structure_regime_change"] = out["term_structure_state"].diff().fillna(0)
         out["backwardation_regime_change"] = out["is_backwardation"].diff().fillna(0)
         out["volume_shock_63d"] = out["volume_surge_63d"]
-        out["oi_shock_63d"] = out["oi_surge_63d"]
+        for periods, values in oi_shocks.items():
+            out[f"oi_shock_{periods}d"] = values
         out["carry_chg_5d"] = out["carry"].diff(5)
         out["carry_chg_10d"] = out["carry"].diff(10)
         out["carry_chg_20d"] = out["carry"].diff(20)

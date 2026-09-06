@@ -137,6 +137,10 @@ DEFAULT_FEATURES = [
     "price_volume_confirm_21d",
     "price_oi_confirm_21d",
     "volume_shock_63d",
+    "oi_shock_10d",
+    "oi_shock_21d",
+    "oi_shock_30d",
+    "oi_shock_42d",
     "oi_shock_63d",
     "carry_pctile_252d",
 ]

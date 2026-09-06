@@ -187,9 +187,10 @@ under `data/` and `config/`.
 
 ### 1. Build Commodity Features
 
-Rebuild a contract-aware carry file when raw or live contract data changes.
-Build into a review directory first; replacing an existing operational file
-requires `--overwrite`:
+Rebuild a contract-aware confirmed carry file when raw or live contract data
+changes. The bare command targets `data/comm/carry_data_2`; the operator-owned
+`data/comm/carry_data` is maintained separately. Build into a review directory
+first; replacing an existing `_2` file requires `--overwrite`:
 
 ```bash
 uv run comm-ls build-carry-data \

@@ -1,6 +1,7 @@
 ticker,sector_ticker,rationale
 ADM,XLP,Liquid consumer-staples hedge alternative
 BG,XLP,Liquid consumer-staples hedge alternative
+ANDE,XLP,Liquid consumer-staples control for agribusiness exposure; ethanol beta remains a separate diagnostic
 PPC,XLP,Liquid consumer-staples hedge alternative
 TSN,XLP,Liquid consumer-staples hedge alternative
 SFD,XLP,Liquid consumer-staples hedge alternative
@@ -8,6 +9,8 @@ JBS,XLP,Liquid consumer-staples hedge alternative
 KDP,XLP,Liquid consumer-staples hedge alternative
 SBUX,XLY,Liquid consumer-discretionary hedge alternative
 BROS,XLY,Liquid consumer-discretionary hedge alternative
+QSR,XLY,Liquid consumer-discretionary hedge alternative
+LKNCY,MCHI,Liquid broad-China equity hedge alternative
 GIL,XLY,Liquid consumer-discretionary and apparel sector proxy
 CSAN,MOO,Agribusiness proxy pending a reviewed liquid Brazil and energy alternative
 AGRO,MOO,Agribusiness proxy pending a reviewed liquid regional and FX alternative

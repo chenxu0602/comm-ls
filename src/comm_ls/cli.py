@@ -154,7 +154,15 @@ def build_parser() -> argparse.ArgumentParser:
 
     carry_data = subparsers.add_parser("build-carry-data")
     carry_data.add_argument("--commodity-dir", type=Path, default=Path("data/comm"))
-    carry_data.add_argument("--output-dir", type=Path, default=Path("data/comm/carry_data"))
+    carry_data.add_argument(
+        "--output-dir",
+        type=Path,
+        default=Path("data/comm/carry_data_2"),
+        help=(
+            "Carry output directory. Defaults to data/comm/carry_data_2; "
+            "data/comm/carry_data is maintained separately by the operator."
+        ),
+    )
     carry_data.add_argument(
         "--symbol",
         action="append",
@@ -311,7 +319,7 @@ def build_parser() -> argparse.ArgumentParser:
     sensitivity_matrix.add_argument("--feature", action="append", default=None)
     sensitivity_matrix.add_argument(
         "--feature-preset",
-        choices=["priority", "curve_shock_vol", "broad", "metals_complex"],
+        choices=["priority", "curve_shock_vol", "broad", "kc_common", "crop_common", "metals_complex"],
         default="priority",
     )
     sensitivity_matrix.add_argument("--horizon", action="append", type=int, default=None)
@@ -331,7 +339,7 @@ def build_parser() -> argparse.ArgumentParser:
     feature_return_cache.add_argument("--feature", action="append", default=None)
     feature_return_cache.add_argument(
         "--feature-preset",
-        choices=["priority", "curve_shock_vol", "broad", "metals_complex"],
+        choices=["priority", "curve_shock_vol", "broad", "kc_common", "crop_common", "metals_complex"],
         default="priority",
     )
     feature_return_cache.add_argument("--horizon", action="append", type=int, default=None)

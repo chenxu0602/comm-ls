@@ -200,14 +200,15 @@ audit before any deployment because crypto-equity liquidity changes quickly.
 
 ## 6. Crypto hedge research convention (2026-08-24)
 
-The agreed research architecture has four distinct layers. Do not collapse
+The agreed research architecture has five distinct layers. Do not collapse
 them into one reported PnL series:
 
 | Layer | Construction | Purpose | Tradable interpretation |
 | --- | --- | --- | --- |
 | Baseline | SPY-only residual | Main equity-alpha research unit | Diagnostic residual, not an executed portfolio |
+| Direct futures falsification | SPY + CME BTC futures-beta residual | Test survival after stripping direct BTC beta without an ETF intermediary | Diagnostic only; BTC futures will not be traded as the hedge |
 | Candidate | SPY + BITO residual | Test whether a tradable ETF removes common BTC exposure more realistically | Research candidate from BITO inception onward |
-| Falsification | SPY + CME BTC futures-beta residual | Determine whether the result survives direct BTC-beta stripping | Diagnostic only; BTC futures will not be traded as the hedge |
+| Incremental falsification | SPY + BITO + CME-BTC residual | Test whether CME BTC removes exposure left after the ETF factor | Diagnostic only |
 | Final simulation | Raw stocks + explicit SPY and BTC ETF positions | Measure implementable PnL, costs, rounding and capacity | Required bridge before any live approval |
 
 The strategy will not trade BTC, ETH, other cryptocurrencies or BTC futures as
@@ -227,6 +228,7 @@ This comes from `config/crypto_theme_sector_hedges.csv`, which is used only by
 the crypto research build. The return columns now have distinct meanings:
 
 - `residual_return_mkt_w12m`: SPY-only baseline;
+- `residual_return_mktcomm_w12m`: joint SPY + CME commodity-futures residual (BTC in the isolated BTC panel, ETH in the isolated ETH panel);
 - `residual_return_mktsec_w12m`: joint SPY + BITO research residual;
 - `residual_return_mktseccomm_w12m`: SPY + BITO + CME-BTC falsification.
 
@@ -285,10 +287,11 @@ ETF experiment.
 For each ticker and role basket, retain these outputs:
 
 1. SPY-only `residual_return_mkt_w12m`;
-2. SPY + BITO `residual_return_mktsec_w12m` over BITO's actual history;
-3. SPY + BTC futures `residual_return_mktseccomm_w12m` falsification;
-4. raw-stock PnL plus continuous explicit SPY/BTC-ETF hedges;
-5. integer-rounded explicit PnL after stock and hedge turnover costs, borrow,
+2. SPY + BTC futures `residual_return_mktcomm_w12m` falsification;
+3. SPY + BITO `residual_return_mktsec_w12m` over BITO's actual history;
+4. SPY + BITO + BTC futures `residual_return_mktseccomm_w12m` incremental falsification;
+5. raw-stock PnL plus continuous explicit SPY/BTC-ETF hedges;
+6. integer-rounded explicit PnL after stock and hedge turnover costs, borrow,
    dividends and execution delay.
 
 If the signal works only in the SPY-only baseline, classify it as BTC beta

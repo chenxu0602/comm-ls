@@ -191,6 +191,10 @@ CURVE_SHOCK_VOL_FEATURES = [
     "large_move_2sigma",
     "m0_atr_14_pct",
     "volume_shock_63d",
+    "oi_shock_10d",
+    "oi_shock_21d",
+    "oi_shock_30d",
+    "oi_shock_42d",
     "oi_shock_63d",
     "volume_surge_63d",
     "oi_surge_63d",
@@ -219,6 +223,103 @@ BROAD_DISCOVERY_FEATURES = [
     *CORE_PRICE_MOMENTUM_FEATURES,
     *FRONT_PRICE_REGIME_FEATURES,
     *CURVE_SHOCK_VOL_FEATURES,
+]
+
+# Coffee C starts from the common CL-style market-state families, but excludes
+# crude-specific fixed calendar anchors, Brent-WTI spreads, NG seasonality and
+# crop/soybean cross-product economics.  Product-specific coffee harvest and
+# inventory features can be added later only after their calendars and known
+# timestamps are reviewed.
+KC_COMMON_DISCOVERY_FEATURES = [
+    "m0_ret_1d",
+    *CORE_PRICE_MOMENTUM_FEATURES,
+    "up_days_21d",
+    *FRONT_PRICE_REGIME_FEATURES,
+    "front_second_spread",
+    "front_third_spread",
+    "front_second_annualized_carry",
+    "front_third_annualized_carry",
+    "liquid_deferred_annualized_carry",
+    "activity_deferred_annualized_carry",
+    "front_second_backwardation_steepness",
+    "front_third_backwardation_steepness",
+    "liquid_deferred_backwardation_steepness",
+    "activity_deferred_backwardation_steepness",
+    "liquid_deferred_log_ret_1d",
+    "liquid_deferred_log_ret_5d",
+    "liquid_deferred_log_ret_21d",
+    "activity_deferred_log_ret_1d",
+    "activity_deferred_log_ret_5d",
+    "activity_deferred_log_ret_21d",
+    "front_second_spread_chg_21d",
+    "front_third_spread_chg_21d",
+    "front_second_annualized_carry_chg_21d",
+    "front_third_annualized_carry_chg_21d",
+    "front_third_annualized_carry_same_contract_chg_21d",
+    "liquid_deferred_annualized_carry_chg_21d",
+    "activity_deferred_annualized_carry_chg_21d",
+    "front_second_backwardation_steepness_chg_21d",
+    "front_third_backwardation_steepness_chg_21d",
+    "liquid_deferred_backwardation_steepness_chg_21d",
+    "activity_deferred_backwardation_steepness_chg_21d",
+    "carry",
+    "carry_chg_5d",
+    "carry_chg_10d",
+    "carry_chg_20d",
+    "carry_chg_21d",
+    "carry_chg_30d",
+    "carry_pctile_252d",
+    "term_structure_regime_change",
+    "backwardation_regime_change",
+    "days_in_backwardation",
+    "realized_vol_20d",
+    "realized_vol_63d",
+    "vol_chg_20d",
+    "abs_ret_1d",
+    "large_move_2sigma",
+    "m0_atr_14_pct",
+    "volume_shock_63d",
+    "oi_shock_10d",
+    "oi_shock_21d",
+    "oi_shock_30d",
+    "oi_shock_42d",
+    "oi_shock_63d",
+    "volume_surge_63d",
+    "oi_surge_63d",
+    "price_volume_confirm_21d",
+    "price_oi_confirm_21d",
+]
+
+# Crop contracts use the same generic price/curve/volatility baseline as KC,
+# plus separately constructed soybean-complex and corn-processing economics.
+# Named CL calendar anchors are deliberately excluded from this baseline.
+_CROP_MARGIN_HORIZONS = (5, 10, 21, 30, 42, 63)
+_CROP_OI_HORIZONS = (10, 21, 30, 42, 63)
+CROP_COMMON_DISCOVERY_FEATURES = [
+    *KC_COMMON_DISCOVERY_FEATURES,
+    "matched_soybean_crush_spread",
+    *(
+        f"matched_soybean_crush_spread_chg_{horizon}d"
+        for horizon in _CROP_MARGIN_HORIZONS
+    ),
+    *(f"zm_minus_zs_oi_shock_{horizon}d_z_spread" for horizon in _CROP_OI_HORIZONS),
+    *(f"zl_minus_zs_oi_shock_{horizon}d_z_spread" for horizon in _CROP_OI_HORIZONS),
+    *(
+        f"corn_ethanol_output_input_momentum_{horizon}d"
+        for horizon in _CROP_MARGIN_HORIZONS
+    ),
+    *(
+        f"corn_processing_energy_cost_tailwind_{horizon}d"
+        for horizon in _CROP_MARGIN_HORIZONS
+    ),
+    *(
+        f"corn_processing_margin_proxy_chg_{horizon}d"
+        for horizon in _CROP_MARGIN_HORIZONS
+    ),
+    *(
+        f"corn_crude_demand_context_{horizon}d"
+        for horizon in _CROP_MARGIN_HORIZONS
+    ),
 ]
 METALS_COMPLEX_DISCOVERY_FEATURES = [
     "gc_hg_relative_log_price_index",
@@ -254,6 +355,8 @@ DISCOVERY_FEATURE_PRESETS = {
     "priority": BROAD_DISCOVERY_FEATURES,
     "curve_shock_vol": CURVE_SHOCK_VOL_FEATURES,
     "broad": BROAD_DISCOVERY_FEATURES,
+    "kc_common": KC_COMMON_DISCOVERY_FEATURES,
+    "crop_common": CROP_COMMON_DISCOVERY_FEATURES,
     "metals_complex": METALS_COMPLEX_DISCOVERY_FEATURES,
 }
 FIRST_ORDER_ROLES = {

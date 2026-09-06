@@ -953,6 +953,64 @@ def build_equity_processed_dataset(
             commodity_beta_matrix = commodity_beta_return_matrices.get(beta_return_frequency, pd.DataFrame())
             if (
                 include_commodity_beta_residuals
+                and mode == "market_only"
+                and commodity_symbol is not None
+                and commodity_symbol in commodity_daily_returns.columns
+                and commodity_symbol in commodity_beta_matrix.columns
+            ):
+                # Joint market + commodity regression.  Reusing the two-factor
+                # pair estimator avoids the order dependence of sequentially
+                # residualizing market and commodity returns.
+                comm_calc = _monthly_or_daily_beta_pair(
+                    daily_stock_ret=daily_returns[ticker],
+                    daily_market_ret=daily_returns[market_ticker],
+                    daily_sector_ret=commodity_daily_returns[commodity_symbol].reindex(
+                        daily_returns.index
+                    ),
+                    beta_stock_ret=beta_matrix[ticker],
+                    beta_market_ret=beta_matrix[market_ticker],
+                    beta_sector_ret=commodity_beta_matrix[commodity_symbol].reindex(
+                        beta_matrix.index
+                    ),
+                    lookback_observations=_lookback_observations(
+                        beta_return_frequency=beta_return_frequency,
+                        beta_lookback_months=int(cfg["beta_lookback_months"]),
+                        beta_lookback_days=252,
+                    ),
+                    min_observations=int(cfg["min_beta_observations"]),
+                    beta_lag_days=beta_lag_days,
+                    beta_update_frequency=str(cfg["beta_update_frequency"]),
+                    beta_return_frequency=beta_return_frequency,
+                    beta_weighting=str(cfg["beta_weighting"]),
+                    beta_half_life_months=float(cfg["beta_half_life_months"]),
+                    beta_smoothing=float(cfg["beta_smoothing"]),
+                    hedge_ratio_scale=float(cfg["hedge_ratio_scale"]),
+                )
+                suffix = variation.replace("mkt_", "")
+                comm_name = f"mktcomm_{suffix}"
+                base[f"commodity_symbol_{comm_name}"] = commodity_symbol
+                base[f"commodity_return_{comm_name}"] = comm_calc[
+                    "sector_return"
+                ].to_numpy()
+                base[f"market_beta_{comm_name}"] = comm_calc["market_beta"].to_numpy()
+                base[f"commodity_beta_{comm_name}"] = comm_calc[
+                    "sector_beta"
+                ].to_numpy()
+                base[f"beta_observations_{comm_name}"] = comm_calc[
+                    "beta_observations"
+                ].to_numpy()
+                base[f"beta_estimation_end_{comm_name}"] = comm_calc[
+                    "beta_estimation_end"
+                ].to_numpy()
+                base[f"residual_return_{comm_name}"] = comm_calc[
+                    "residual_return"
+                ].to_numpy()
+                base[f"commodity_beta_return_column_{comm_name}"] = (
+                    commodity_return_column
+                )
+                commodity_residual_count += 1
+            if (
+                include_commodity_beta_residuals
                 and mode == "market_sector"
                 and commodity_symbol is not None
                 and commodity_symbol in commodity_daily_returns.columns

@@ -45,6 +45,11 @@ ANCHOR_MONTHS_BY_SYMBOL: dict[str, tuple[int, ...]] = {
     "HG": (1, 3, 5, 7, 9, 12),
     "PA": (3, 6, 9, 12),
     "PL": (1, 4, 7, 10),
+    # ICE Coffee C lists Mar/May/Jul/Sep/Dec.  Calendar spread research must
+    # use these delivery months instead of inheriting the energy H/M/U/Z
+    # default, because the omitted K/N contracts are economically meaningful
+    # around the Brazilian crop and frost-risk cycle.
+    "KC": (3, 5, 7, 9, 12),
     "BTC": (3, 6, 9, 12),
     "DCR": (3, 6, 9, 12),
     "QSO": (3, 6, 9, 12),
@@ -391,6 +396,23 @@ def load_contract_panel(config: CarryBuildConfig) -> pd.DataFrame:
             live_preferred_start_date=live_preferred_start_date,
         )
 
+    if symbol == "SCO" and "source__live" in merged:
+        # A dated SCO live row is also an availability record.  If its OHLC
+        # snapshot was not captured, do not revise the operational ATR later
+        # with a Bloomberg/history OHLC fallback.  The contract-level ATR
+        # logic below carries the prior observed state across that date.
+        post_cutover = pd.to_datetime(merged["date"], errors="coerce").ge(
+            live_preferred_start_date
+        )
+        live_row = merged["source__live"].notna()
+        for field in ("open", "high", "low"):
+            live_field = merged.get(
+                f"{field}__live", pd.Series(np.nan, index=merged.index)
+            )
+            missing_snapshot = post_cutover & live_row & live_field.isna()
+            out.loc[missing_snapshot, field] = np.nan
+            out.loc[missing_snapshot, f"{field}_source"] = "live_snapshot_missing"
+
     all_dates = sorted(pd.Timestamp(value) for value in out["date"].dropna().unique())
     session_rank = {date: rank for rank, date in enumerate(all_dates)}
     out = _fill_activity_from_recent_history(
@@ -444,9 +466,25 @@ def load_contract_panel(config: CarryBuildConfig) -> pd.DataFrame:
         ],
         axis=1,
     ).max(axis=1)
-    out["atr_14"] = true_range.groupby(out["contract"], observed=True).transform(
-        lambda values: values.rolling(14, min_periods=14).mean()
-    )
+    if symbol == "SCO":
+        # The SGX page exposes the current Asian session's OHLC/last before
+        # that session's settlement and volume are published.  Hand-entered
+        # snapshots can therefore omit OHLC on an otherwise valid dated row.
+        # Compute ATR on the last 14 actually observed true ranges and carry
+        # the prior ATR across the missing-OHLC date.  A missing snapshot must
+        # not poison the following 13 valid observations.
+        def observed_atr(values: pd.Series) -> pd.Series:
+            observed = values.dropna()
+            atr = observed.rolling(14, min_periods=14).mean()
+            return atr.reindex(values.index).ffill()
+
+        out["atr_14"] = true_range.groupby(
+            out["contract"], observed=True
+        ).transform(observed_atr)
+    else:
+        out["atr_14"] = true_range.groupby(out["contract"], observed=True).transform(
+            lambda values: values.rolling(14, min_periods=14).mean()
+        )
     return out.sort_values(["date", "contract"]).reset_index(drop=True)
 
 

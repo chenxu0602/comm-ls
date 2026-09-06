@@ -18,7 +18,7 @@ GC_CACHE_PATH = Path("data/cache/feature_return_observation_v1/GC-multi_return_2
 SCO_CACHE_PATH = Path("data/cache/feature_return_observation_v1/SCO-multi_return_2.parquet")
 SHADOW_CARRY_DIR = Path("data/comm/carry_data_2")
 COMMODITY_DIR = Path("data/comm")
-PERSISTENT_AUXILIARY_INPUTS = frozenset({"sco_curve_vol"})
+PERSISTENT_AUXILIARY_INPUTS = frozenset({"sco_curve_vol", "sco_pulse_vol"})
 
 HG_GC_GAP_FEATURE = "feature_value__hg_gc_matched_ratio_ma_gap_3d_50d_raw"
 GC_CARRY_FEATURE = "feature_z__liquid_deferred_annualized_carry_chg_21d"
@@ -27,7 +27,7 @@ SCO_RETURN_FEATURE = "feature_z__ret_63d_v2"
 SCO_DRAWDOWN_FEATURE = "feature_z__drawdown_63d"
 SCO_VOL_FEATURE = "feature_z__realized_vol_63d"
 SCO_CURVE_VOL_FEATURE = "M0_atr_14"
-SCO_PULSE_VOL_FEATURE = "M0_ret_std_20"
+SCO_PULSE_VOL_FEATURE = SCO_CURVE_VOL_FEATURE
 
 
 @dataclass(frozen=True)
@@ -41,6 +41,7 @@ class MetalsSleeveConfig:
     feature_symbol: str
     sector_hedge: str = "XME"
     hold_days: int | None = None
+    execution_lag: int = 1
     params: Mapping[str, float | int | str] = field(default_factory=dict)
 
     @property
@@ -50,16 +51,17 @@ class MetalsSleeveConfig:
 
 # Source of truth for the Metals production candidate. The rules and
 # allocations mirror the executed portfolio cells in
-# notebooks/backtest_mt.ipynb after the 2026-08-23 review.
+# notebooks/backtest_mt_v43.ipynb after the 2026-09-02 review.
 METALS_SLEEVE_CONFIG: dict[str, MetalsSleeveConfig] = {
     "hg_gc_gap_gc_carry_iron": MetalsSleeveConfig(
-        weight=0.15,
+        weight=0.20,
         tickers=("BHP", "RIO", "VALE", "FSUGY"),
         internal_weights={"BHP": 0.40, "RIO": 0.30, "VALE": 0.20, "FSUGY": 0.10},
         signal_rule="dual_feature_hysteresis",
         signal_ticker="BHP",
         feature="hg_gc_matched_ratio_ma_gap_3d_50d_raw",
         feature_symbol="METALS+GC",
+        execution_lag=2,
         params={
             "long_entry_hg": -0.01,
             "long_entry_gc": 0.10,
@@ -94,13 +96,14 @@ METALS_SLEEVE_CONFIG: dict[str, MetalsSleeveConfig] = {
         },
     ),
     "sco_specialty_alloys": MetalsSleeveConfig(
-        weight=0.10,
+        weight=0.05,
         tickers=("ATI", "CRS", "HWM"),
         internal_weights={"ATI": 0.40, "CRS": 0.40, "HWM": 0.20},
         signal_rule="sco_specialty_alloys_hysteresis",
         signal_ticker="ATI",
         feature="ret_63d_v2+drawdown_63d+realized_vol_63d",
         feature_symbol="SCO",
+        execution_lag=2,
         params={
             "zero_threshold": 0.0,
             "short_vol_floor": -1.0,
@@ -109,12 +112,12 @@ METALS_SLEEVE_CONFIG: dict[str, MetalsSleeveConfig] = {
         },
     ),
     "sco_vol_miners": MetalsSleeveConfig(
-        weight=0.10,
+        weight=0.15,
         tickers=("BHP", "RIO", "VALE", "SCCO"),
         internal_weights={"BHP": 0.30, "RIO": 0.30, "VALE": 0.20, "SCCO": 0.20},
         signal_rule="sco_vol_regime_pulse",
         signal_ticker="BHP",
-        feature="M0_ret_std_20",
+        feature="M0_atr_14",
         feature_symbol="SCO",
         # The executed notebook portfolio uses a two-session fixed hold.
         hold_days=2,
@@ -127,7 +130,7 @@ METALS_SLEEVE_CONFIG: dict[str, MetalsSleeveConfig] = {
         },
     ),
     "copper_miner": MetalsSleeveConfig(
-        weight=0.15,
+        weight=0.10,
         tickers=("SCCO",),
         internal_weights={"SCCO": 1.0},
         signal_rule="copper_energy_terms_of_trade",
@@ -182,6 +185,8 @@ def validate_config(config: Mapping[str, MetalsSleeveConfig] = METALS_SLEEVE_CON
             raise ValueError(f"{sleeve} signal ticker is not in the sleeve")
         if cfg.sector_hedge != "XME":
             raise ValueError(f"{sleeve} must use XME as its sector hedge")
+        if cfg.execution_lag < 1:
+            raise ValueError(f"{sleeve} execution lag must be at least one session")
 
 
 def require_shadow_cache(path: Path) -> None:
@@ -650,12 +655,12 @@ def load_signal_bundle(
     if carry_dir.name != "carry_data_2":
         raise ValueError(f"Metals live targets require carry_data_2: {carry_dir}")
     sco_carry_path = carry_dir / "SCO.csv"
-    sco_carry = pd.read_csv(
-        sco_carry_path,
-        usecols=["date", SCO_CURVE_VOL_FEATURE, SCO_PULSE_VOL_FEATURE],
+    sco_columns = list(
+        dict.fromkeys(["date", SCO_CURVE_VOL_FEATURE, SCO_PULSE_VOL_FEATURE])
     )
+    sco_carry = pd.read_csv(sco_carry_path, usecols=sco_columns)
     sco_carry["date"] = pd.to_datetime(sco_carry["date"], errors="coerce")
-    for column in (SCO_CURVE_VOL_FEATURE, SCO_PULSE_VOL_FEATURE):
+    for column in dict.fromkeys((SCO_CURVE_VOL_FEATURE, SCO_PULSE_VOL_FEATURE)):
         sco_carry[column] = pd.to_numeric(sco_carry[column], errors="coerce")
     sco_carry = (
         sco_carry.dropna(subset=["date"])
@@ -751,7 +756,7 @@ def load_signal_bundle(
             SCO_VOL_FEATURE,
         ),
         "sco_curve_vol": _latest_valid_date(sco_curve_vol, SCO_CURVE_VOL_FEATURE),
-        "sco_ret_std_20": _latest_valid_date(sco_pulse_vol, SCO_PULSE_VOL_FEATURE),
+        "sco_pulse_vol": _latest_valid_date(sco_pulse_vol, SCO_PULSE_VOL_FEATURE),
         "copper_hg_cl_ratio": _latest_valid_date(
             copper_diag["hg_cl_ratio"], "copper hg/cl ratio"
         ),
@@ -777,6 +782,7 @@ def target_side(
     as_of: pd.Timestamp,
     target_date: pd.Timestamp,
     hold_days: int | None,
+    execution_lag: int = 1,
 ) -> float:
     as_of = pd.Timestamp(as_of).normalize()
     target_date = pd.Timestamp(target_date).normalize()
@@ -787,12 +793,22 @@ def target_side(
         raise ValueError(
             f"Signal cache is stale: latest={known.index.max().date()} as_of={as_of.date()}"
         )
+    if execution_lag < 1:
+        raise ValueError("execution_lag must be at least one session")
+    if len(known) < execution_lag:
+        raise ValueError(
+            f"Need at least {execution_lag} signal observations for execution lag"
+        )
     extended = pd.concat([known, pd.Series(0.0, index=pd.DatetimeIndex([target_date]))])
     extended = extended[~extended.index.duplicated(keep="last")].sort_index()
     if hold_days is None:
-        position = extended.shift(1).fillna(0.0)
+        position = extended.shift(execution_lag).fillna(0.0)
     else:
-        position = fixed_hold_position(extended, hold_days=hold_days, execution_lag=1)
+        position = fixed_hold_position(
+            extended,
+            hold_days=hold_days,
+            execution_lag=execution_lag,
+        )
     return float(position.loc[target_date])
 
 
@@ -805,11 +821,22 @@ def build_component_targets(
 ) -> pd.DataFrame:
     rows: list[dict[str, object]] = []
     for component, cfg in config.items():
+        known_signal = pd.to_numeric(
+            bundle.signals[component], errors="coerce"
+        ).loc[:as_of].dropna().sort_index()
+        if len(known_signal) < cfg.execution_lag:
+            raise ValueError(
+                f"{component} needs at least {cfg.execution_lag} signal observations"
+            )
+        decision_input_date = pd.Timestamp(
+            known_signal.index[-cfg.execution_lag]
+        ).normalize()
         side = target_side(
             bundle.signals[component],
             as_of=as_of,
             target_date=target_date,
             hold_days=cfg.hold_days,
+            execution_lag=cfg.execution_lag,
         )
         diagnostic = bundle.diagnostics[component].loc[:as_of]
         latest = diagnostic.iloc[-1] if not diagnostic.empty else pd.Series(dtype=float)
@@ -828,12 +855,14 @@ def build_component_targets(
                     "feature": cfg.feature,
                     "mode": cfg.position_mode,
                     "hold_days": cfg.hold_days,
+                    "execution_lag_sessions": cfg.execution_lag,
+                    "decision_input_date": decision_input_date,
                     "side": side,
                     "sleeve_weight": cfg.weight,
                     "internal_weight": internal_weight,
                     "research_target_weight": side * cfg.weight * internal_weight,
                     "sector_hedge": cfg.sector_hedge,
-                    "signal_date": as_of if side != 0 else pd.NaT,
+                    "signal_date": decision_input_date if side != 0 else pd.NaT,
                     "reason": (
                         f"{cfg.signal_rule} active; {diagnostic_text}"
                         if side != 0
