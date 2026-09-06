@@ -13,6 +13,13 @@
 - Today's executable turnover: 1.95%
 - Estimated execution cost: $0.15
 
+## Strategy Change Notes
+
+- Effective with the 2026-09-08 target, separate-account AUM increased from $2,000 to $3,000.
+- Added the HG carry + NG power shared sleeve at 30%; allocation changed from Platforms/BTC/ETH = 30%/35%/35% to Platforms/BTC/ETH/HG+NG = 20%/30%/20%/30%.
+- The $3,000 AUM keeps the original three sleeves' aggregate nominal budget near its prior level: $3,000 x 70% = $2,100 versus the former $2,000 budget. The incremental capital primarily reserves capacity for the new sleeve when its signal is active.
+- On the 2026-09-04 signal date the HG+NG sleeve signal is zero; the 2026-09-08 stock target therefore reflects only the active legacy sleeves and integer rounding.
+
 ## Execution Notes
 
 - This package belongs to the separate Crypto IB account; never net its SPY hedge with CL/Metals.
