@@ -555,6 +555,37 @@ The normalized raw contract schema may reuse common project utilities, but
 crop-year selection, seasonal features and crush construction belong inside
 the agriculture package.
 
+## Current Crypto implementation handoff
+
+For the production/research state effective with the 2026-09-08 target,
+including the USD 3,000 AUM decision and HG-carry plus NG-power sleeve, read
+`docs/current_crypto_status_2026-09-08.md` before making changes.
+
+At a glance:
+
+- Crypto is a separate IB book with USD 3,000 AUM; do not net its SPY hedge
+  with CL/Metals.
+- Production weights are Platforms/BTC/ETH/HG+NG = 20%/30%/20%/30%, replacing
+  the prior 30%/35%/35% allocation.
+- The new shared sleeve uses HG `carry_chg_20d` together with the 20- and
+  5-session changes of NG `calendar_U_Z_annualized_carry`, followed by a
+  two-session rolling-mean smoothing and the existing one-session target
+  delay.
+- Its internal MARA/RIOT/CLSK/COIN/HOOD/HIVE weights are
+  15%/20%/20%/20%/15%/10%.
+- Production implementation is in `src/comm_ls/crypto_strategy.py`; HG and NG
+  are independently aligned from `commodity_signals_2.parquet` to the MARA
+  calendar under `stock_observation_asof`. They are signal drivers, never
+  crypto-equity return sources.
+- The 2026-09-04 HG+NG signal is zero. The frozen 2026-09-08 package has 20%
+  gross short stock exposure, +67.14% continuous SPY hedge, and only three
+  stock orders: buy 2 CLSK, buy 7 HIVE, buy 1 MARA. Existing three SPY shares
+  remain unchanged under executable integer rounding.
+- The standalone residual backtest Sharpe is 1.388 and the revised displayed
+  portfolio Sharpe is 2.634, but BTC-beta residual falsification, true OOS,
+  multiple-testing review, explicit-hedge simulation, and live reconciliation
+  remain open. This is not a fully validated deployment promotion.
+
 ## 12. Proposed research sequence
 
 ### Crypto
