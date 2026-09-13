@@ -1,0 +1,39 @@
+{
+  "status": "complete",
+  "seed": 20260907,
+  "max_reps": 5000,
+  "min_offset": 63,
+  "source_manifest_sha256": "f96c19b7edae2de5681516472c85d3de287eacdd58703e7bccfe5afe4a15a1ca",
+  "source_inputs": {
+    "sim_results_clv43/chemical_2.csv": "40f354ef6f30e36af36e539de7abe6bdac4989b4a620770b09263aecafaf114c",
+    "sim_results_clv43/chemical_pos_2.csv": "1156cbfc797ba6f3273e65ac79481f99e476a0a5bb58f9e04d70c2a09f10a4e3",
+    "notebooks/backtest_cl_v43.ipynb": "ed0fe1eea318b074976c0ceb3482517c54a8896eb005632353ce4e8ffb99498a",
+    "data/cache/feature_return_observation_v1/CL-multi_return_2.parquet": "e969bda0616d757d67fe7f8b6fccb1d4513e9ed552f9c8bf7b40a928ee117de5",
+    "data/processed/equity_processed_chemical.parquet": "551747afb8dd23c6f140c2bf4f5658db4630c08e9babf37d1f32f0974f2862ee",
+    "/Users/chenxu/Work/comm-ls/scripts/audit_chemical_calendar_bridge.py": "c45a6e42ccefe7d643fa0da508ca2c280b24d8be3f2f85cf874fbf6f34596a4c",
+    "scripts/audit_chemical_robustness.py": "70f7e5420892db94bf96371f292f5e295ab06c03eb7db8a1434d764a5daaf7c0",
+    "scripts/audit_chemical_saved_results.py": "1d156efcdd164e9db3338687d72e537a2a6c9196e9bfce2faf747e134066fd45",
+    "data/equity/yfinance/AVNT.csv": "6b0f3f40ac66e901d1ed00a5c81729cf64b59ee8272148cc93524d695b40e67b",
+    "data/equity/yfinance/CE.csv": "494c59eb804ed538f144d8b2ecb8eb85cf778f996147cd0b157f3b8eee167741",
+    "data/equity/yfinance/DOW.csv": "3d1cf53708dfa5168d96531a0793ec7787c2848f87bed2a912069ae621fa822b",
+    "data/equity/yfinance/EMN.csv": "697bb39dc916e043ad40bdb5c20aafade480ffc072115e00f0497b0d882ea455",
+    "data/equity/yfinance/HUN.csv": "f18457b039169cab11eb03e76ee9de749671d77c4214e53fe3d1fd5c422640e6",
+    "data/equity/yfinance/LYB.csv": "8a87367ee4951283616b263caf419944d5a0c26eb96f7a42b009e766ff496a6a",
+    "data/equity/yfinance/WLK.csv": "ff2dfbc2e45686f3bafcd428c0d1556b6398d567bcc5a58b9ab57af6ef0543c3",
+    "data/equity/yfinance/SPY.csv": "411f3d299fc8a096fce24153b433a55a84fd899559537b05097720365c18708f",
+    "data/equity/yfinance/XLE.csv": "cc5676c1f5c23623f8f6182e0d7d7a8a4eb1d03f0e0540f7bd7ea8d6a1bb8482",
+    "data/equity/yfinance/XLB.csv": "e88c9f890cf81f2c72a1829593271ff65cf15fc5a84a3aaba1cd274df59158ee"
+  },
+  "script_sha256": "68ef8e1eb6b770b89db1c11b37120024124688c426c4eca8d8cde4cafc813b95",
+  "primary": "SPY_XLE, borrow300; full strategy and short-only timing",
+  "limitations": [
+    "2024+ repeatedly used history, not clean OOS",
+    "Circular shifts preserve joint target path on a ring, not causal feasibility",
+    "Linear sample seam may split one episode; first held row is flat; final target unearned",
+    "Rank is conditional placebo diagnostic, NOT selection-adjusted p-value",
+    "Nonstationary regimes can violate time-shift exchangeability",
+    "Constant-short exposure is matched ex post, not a forecast or deployable sizing rule",
+    "Standalone chemical only, no CL 28% allocation/caps or other sleeves",
+    "Continuous daily-close targets, no VWAP/integer/actual IB; no financing"
+  ]
+}

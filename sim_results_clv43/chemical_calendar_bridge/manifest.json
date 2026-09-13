@@ -1,0 +1,42 @@
+{
+  "status": "complete",
+  "inputs": {
+    "sim_results_clv43/chemical_2.csv": "28b5e2566bbaa2f0af7e505fab3c023f73f8d337ad35e4ce377cefca656d57d6",
+    "sim_results_clv43/chemical_pos_2.csv": "9dd63c879f914e88a8c9b31bf9eb9fab35882736182120765c7119d1a45c6a2e",
+    "notebooks/backtest_cl_v43.ipynb": "ce76fa82d05fa8268b662492b3ccc3239cac8933943ad4628e2f5dfb23a0d4b8",
+    "data/cache/feature_return_observation_v1/CL-multi_return_2.parquet": "350287d3653b25310186c0453d0700ee826d801ebb881cb7e9e2fe8e70b12202",
+    "data/processed/equity_processed_chemical.parquet": "8687ed66b3c8654adbf6663893aec51a8d7bb0d65cc24a756219f89dcaf1d8ae",
+    "/Users/chenxu/Work/comm-ls/scripts/audit_chemical_calendar_bridge.py": "c45a6e42ccefe7d643fa0da508ca2c280b24d8be3f2f85cf874fbf6f34596a4c",
+    "scripts/audit_chemical_robustness.py": "70f7e5420892db94bf96371f292f5e295ab06c03eb7db8a1434d764a5daaf7c0",
+    "scripts/audit_chemical_saved_results.py": "1d156efcdd164e9db3338687d72e537a2a6c9196e9bfce2faf747e134066fd45",
+    "data/equity/yfinance/AVNT.csv": "ddaf3a988768da6b8b9a464ddbbe7195bc2c53de264936da9e718107177fac3c",
+    "data/equity/yfinance/CE.csv": "4a2084b6e21d72a085c22d9d081bbd3f1277b7b08db33fd3ad4275792e9c0901",
+    "data/equity/yfinance/DOW.csv": "8c0d1614e2e25b36e83f8b461d5a92272b7ccba5bfea74c68a97f1bea37f8ebe",
+    "data/equity/yfinance/EMN.csv": "747996e8e9fae12ac59a8013c89660d35fd4572ccf5ff016142205ba41666489",
+    "data/equity/yfinance/HUN.csv": "71ddd91540255ad4e050e191d8f485693ce28327136f235f63554beedca35e61",
+    "data/equity/yfinance/LYB.csv": "8bbb3fb2c0e48ec945307d8a6e6289ef65d631b28fe74a7ba631811031ed554d",
+    "data/equity/yfinance/WLK.csv": "1cd6b3a0ec789de8c1add9dbd36ec36f4366e5388f742c9718ec2b59edaaf997",
+    "data/equity/yfinance/SPY.csv": "e1d31e774d3d1dfa2c2ec8f4877288e21a70939a97695a2242526914af8e4d7a",
+    "data/equity/yfinance/XLE.csv": "0ef776e9ffd295e9e2357f9c4ae99d9b12d81374dd2dfcec78cda61d7c19cc21",
+    "data/equity/yfinance/XLB.csv": "1278af689f8a2dd8efbbeb85c1cd391faa2d12062ecfffdbb8603fe6157c389e"
+  },
+  "focus": [
+    "2025-11-01",
+    "2026-04-30"
+  ],
+  "short_exits": [
+    -0.05,
+    -0.04
+  ],
+  "scope": "Isolated calendar repair, reused history, frozen current betas, no production mutation",
+  "limitations": [
+    "Beta estimates not refitted; weekly beta/source-vintage audit remains separate",
+    "Source SPY dates proxy US sessions; no independent exchange-calendar validation",
+    "Explicit is continuous close-to-close, fixed capital, NOT VWAP or actual IB",
+    "No interest, margin, integer constraints, borrow availability or tax modeling",
+    "Adjusted returns include dividend effects; borrow stresses are assumptions",
+    "Future feature availability and original stock selection remain unaudited"
+  ],
+  "common_start": "2019-10-01 00:00:00",
+  "common_end": "2026-09-08 00:00:00"
+}

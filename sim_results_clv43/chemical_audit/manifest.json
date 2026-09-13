@@ -1,0 +1,15 @@
+{
+  "inputs": {
+    "sim_results_clv43/chemical_2.csv": "40f354ef6f30e36af36e539de7abe6bdac4989b4a620770b09263aecafaf114c",
+    "sim_results_clv43/chemical_pos_2.csv": "1156cbfc797ba6f3273e65ac79481f99e476a0a5bb58f9e04d70c2a09f10a4e3"
+  },
+  "seed": 20260907,
+  "reps": 5000,
+  "limitations": [
+    "saved residual Net only; not actual IB",
+    "no parameter-selection adjustment; 2024+ is reused history",
+    "positions may precede residual coverage; see missing counts",
+    "incremental costs omit explicit hedge and separate dividend cashflows",
+    "episode counts do not estimate effective independent N"
+  ]
+}

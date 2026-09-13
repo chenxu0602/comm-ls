@@ -1,0 +1,180 @@
+{
+  "inputs": {
+    "data/cache/feature_return_observation_v1/CL-multi_return_2.parquet": "e969bda0616d757d67fe7f8b6fccb1d4513e9ed552f9c8bf7b40a928ee117de5",
+    "data/processed/equity_processed_chemical.parquet": "551747afb8dd23c6f140c2bf4f5658db4630c08e9babf37d1f32f0974f2862ee",
+    "notebooks/backtest_cl_v43.ipynb": "ed0fe1eea318b074976c0ceb3482517c54a8896eb005632353ce4e8ffb99498a",
+    "sim_results_clv43/chemical_2.csv": "40f354ef6f30e36af36e539de7abe6bdac4989b4a620770b09263aecafaf114c",
+    "sim_results_clv43/chemical_pos_2.csv": "1156cbfc797ba6f3273e65ac79481f99e476a0a5bb58f9e04d70c2a09f10a4e3",
+    "/Users/chenxu/Work/comm-ls/scripts/audit_chemical_robustness.py": "70f7e5420892db94bf96371f292f5e295ab06c03eb7db8a1434d764a5daaf7c0"
+  },
+  "smoke": false,
+  "status": "complete",
+  "current": [
+    30,
+    -0.01,
+    -0.05
+  ],
+  "weights": {
+    "AVNT": 0.05,
+    "CE": 0.1,
+    "DOW": 0.2,
+    "EMN": 0.1,
+    "HUN": 0.1,
+    "LYB": 0.25,
+    "WLK": 0.2
+  },
+  "short_exits": [
+    -0.03,
+    -0.04,
+    -0.05,
+    -0.06,
+    -0.07,
+    -0.08
+  ],
+  "grid": [
+    [
+      20,
+      -0.005,
+      -0.03
+    ],
+    [
+      20,
+      -0.005,
+      -0.05
+    ],
+    [
+      20,
+      -0.005,
+      -0.08
+    ],
+    [
+      20,
+      -0.01,
+      -0.03
+    ],
+    [
+      20,
+      -0.01,
+      -0.05
+    ],
+    [
+      20,
+      -0.01,
+      -0.08
+    ],
+    [
+      20,
+      -0.02,
+      -0.03
+    ],
+    [
+      20,
+      -0.02,
+      -0.05
+    ],
+    [
+      20,
+      -0.02,
+      -0.08
+    ],
+    [
+      30,
+      -0.005,
+      -0.03
+    ],
+    [
+      30,
+      -0.005,
+      -0.05
+    ],
+    [
+      30,
+      -0.005,
+      -0.08
+    ],
+    [
+      30,
+      -0.01,
+      -0.03
+    ],
+    [
+      30,
+      -0.01,
+      -0.05
+    ],
+    [
+      30,
+      -0.01,
+      -0.08
+    ],
+    [
+      30,
+      -0.02,
+      -0.03
+    ],
+    [
+      30,
+      -0.02,
+      -0.05
+    ],
+    [
+      30,
+      -0.02,
+      -0.08
+    ],
+    [
+      40,
+      -0.005,
+      -0.03
+    ],
+    [
+      40,
+      -0.005,
+      -0.05
+    ],
+    [
+      40,
+      -0.005,
+      -0.08
+    ],
+    [
+      40,
+      -0.01,
+      -0.03
+    ],
+    [
+      40,
+      -0.01,
+      -0.05
+    ],
+    [
+      40,
+      -0.01,
+      -0.08
+    ],
+    [
+      40,
+      -0.02,
+      -0.03
+    ],
+    [
+      40,
+      -0.02,
+      -0.05
+    ],
+    [
+      40,
+      -0.02,
+      -0.08
+    ]
+  ],
+  "convention": "Standalone additive weighted log residual Net, 25bps stock turnover, no name cap",
+  "limitations": [
+    "2024+ reused history, NOT clean OOS",
+    "No deployment decision or search for a replacement winner",
+    "Observation-date mapping is NOT proof of availability-time safety",
+    "Residual comparison excludes explicit ETF costs, borrow and cash dividends",
+    "Episodes are descriptive, not independent sample counts"
+  ],
+  "hedge_comparison_scope": "Covered sessions only; inspect excluded dates, NOT full-history tradable performance"
+}
