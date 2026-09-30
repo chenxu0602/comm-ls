@@ -15,6 +15,7 @@ CRACK_BLEND_WEIGHTS = {
     "crack_02": 0.20,
     "crack_03": 0.30,
 }
+CRACK_COLUMNS = tuple(CRACK_BLEND_WEIGHTS)
 ROLL_COLUMN_ALIASES = {
     "open int": "open_interest",
     "open_interest": "open_interest",
@@ -86,6 +87,98 @@ def add_crack_crossover_features(frame: pd.DataFrame) -> pd.DataFrame:
         for crack, position in zip(CRACK_BLEND_WEIGHTS, positions, strict=True)
     )
     return output
+
+
+def build_seasonality_adjusted_crack_signals(
+    frame: pd.DataFrame,
+    *,
+    lookback_years: int = 8,
+    smooth_window: int = 10,
+    smooth_min_periods: int = 5,
+    earliest_contract_year: int = 2010,
+) -> pd.DataFrame:
+    """Return a separate prior-contract-year seasonality-adjusted crack table.
+
+    For each observation, compare its active fixed-calendar contract with the
+    same month/day observations from prior delivery years.  Each historical
+    contract path is smoothed before taking the cross-year median.  Centered
+    smoothing is safe here because only strictly earlier delivery years enter
+    the median; this table remains research-only and does not mutate ``frame``.
+
+    The adjusted copy keeps the familiar ``crack_01/02/03`` names so notebook
+    signal code can be reused.  Original levels and seasonal medians are kept
+    in ``*_raw`` and ``*_seasonal_median`` columns.
+    """
+    if lookback_years < 1:
+        raise ValueError("lookback_years must be positive")
+    if not 1 <= smooth_min_periods <= smooth_window:
+        raise ValueError("Require 1 <= smooth_min_periods <= smooth_window")
+    required = {"date", "june_contract", *CRACK_COLUMNS}
+    missing = required.difference(frame.columns)
+    if missing:
+        raise ValueError(f"Crack frame is missing required columns: {sorted(missing)}")
+
+    output = frame.copy()
+    output["date"] = pd.to_datetime(output["date"], errors="raise").dt.normalize()
+    output = output.sort_values("date").drop_duplicates("date", keep="last")
+    contract = output["june_contract"].astype("string")
+    output["_contract_year"] = pd.to_numeric(
+        contract.str.extract(r"^(\d{4})[A-Z]$", expand=False), errors="coerce"
+    )
+    if output["_contract_year"].isna().any():
+        raise ValueError("june_contract must use YYYY<month-code> values")
+    output["_contract_year"] = output["_contract_year"].astype(int)
+
+    smoothed: dict[str, dict[int, pd.Series]] = {crack: {} for crack in CRACK_COLUMNS}
+    contract_groups = output.groupby("_contract_year", sort=True)
+    for year, group in contract_groups:
+        indexed = group.set_index("date").sort_index()
+        for crack in CRACK_COLUMNS:
+            smoothed[crack][int(year)] = (
+                pd.to_numeric(indexed[crack], errors="coerce")
+                .rolling(smooth_window, min_periods=smooth_min_periods, center=True)
+                .mean()
+            )
+
+    medians = {crack: [] for crack in CRACK_COLUMNS}
+    for date_value, contract_year_value in output[
+        ["date", "_contract_year"]
+    ].itertuples(index=False, name=None):
+        current_year = int(contract_year_value)
+        date = pd.Timestamp(date_value)
+        day = min(date.day, 28) if date.month == 2 else date.day
+        for crack in CRACK_COLUMNS:
+            observations: list[float] = []
+            for historical_year in range(
+                max(current_year - lookback_years, earliest_contract_year), current_year
+            ):
+                series = smoothed[crack].get(historical_year)
+                if series is None:
+                    continue
+                comparison_year = date.year - (current_year - historical_year)
+                comparison_date = pd.Timestamp(comparison_year, date.month, day)
+                available = series.loc[series.index >= comparison_date].dropna()
+                if not available.empty:
+                    observations.append(float(available.iloc[0]))
+            medians[crack].append(
+                float(np.median(observations)) if observations else np.nan
+            )
+
+    for crack in CRACK_COLUMNS:
+        output[f"{crack}_raw"] = pd.to_numeric(output[crack], errors="coerce")
+        output[f"{crack}_seasonal_median"] = medians[crack]
+        output[crack] = output[f"{crack}_raw"] - output[f"{crack}_seasonal_median"]
+
+    output = output.drop(columns="_contract_year")
+    output = add_crack_crossover_features(output)
+    output.attrs.update(
+        seasonality_adjusted=True,
+        lookback_years=lookback_years,
+        smooth_window=smooth_window,
+        smooth_min_periods=smooth_min_periods,
+        earliest_contract_year=earliest_contract_year,
+    )
+    return output.reset_index(drop=True)
 
 
 def _arrival_by_date(

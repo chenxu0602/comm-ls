@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from bisect import bisect_left
 from pathlib import Path
 
 import numpy as np
@@ -13,6 +14,18 @@ CROP_RESEARCH_SYMBOLS = ("ZC", "ZS", "ZM", "ZL")
 MATCHED_CRUSH_MONTHS = frozenset("F H K N Q U".split())
 MARGIN_HORIZONS = (5, 10, 21, 30, 42, 63)
 OI_HORIZONS = (10, 21, 30, 42, 63)
+SEASONAL_CRUSH_MONTHS = ("F", "H", "K", "N", "Q", "U", "V", "Z")
+SEASONAL_CRUSH_LEG_MONTHS = {
+    "ZM": SEASONAL_CRUSH_MONTHS,
+    "ZL": SEASONAL_CRUSH_MONTHS,
+    # Soybeans have no V/Z pairing in the executed notebook construction;
+    # both late-year meal/oil contracts use the X soybean contract.
+    "ZS": ("F", "H", "K", "N", "Q", "U", "X", "X"),
+}
+CALENDAR_MONTH_CODES = {
+    1: "F", 2: "G", 3: "H", 4: "J", 5: "K", 6: "M",
+    7: "N", 8: "Q", 9: "U", 10: "V", 11: "X", 12: "Z",
+}
 
 
 def soybean_crush_usd_per_bushel(
@@ -25,6 +38,98 @@ def soybean_crush_usd_per_bushel(
     meal_value = pd.to_numeric(meal_usd_per_short_ton, errors="coerce") * 44.0 / 2000.0
     oil_value = pd.to_numeric(oil_cents_per_pound, errors="coerce") * 11.0 / 100.0
     return meal_value + oil_value - soybean_cost
+
+
+def build_seasonality_adjusted_soybean_crush(
+    commodity_dir: Path,
+    dates: pd.Index | pd.Series,
+    *,
+    lookback_years: int = 8,
+    smooth_window: int = 10,
+    smooth_min_periods: int = 5,
+    earliest_contract_year: int = 2010,
+) -> pd.DataFrame:
+    """Port the executed agri-notebook seasonal board-crush adjustment.
+
+    The active contract is the next listed ZM month after the observation's
+    calendar month (an exact listed month advances once more).  Its raw crush
+    is compared with the same contract/month/day observations from strictly
+    earlier contract years.  Historical paths are centered-smoothed before
+    their cross-year median is taken; this remains timestamp-safe because no
+    current/future contract year enters the seasonal baseline.
+    """
+    if lookback_years < 1:
+        raise ValueError("lookback_years must be positive")
+    if not 1 <= smooth_min_periods <= smooth_window:
+        raise ValueError("Require 1 <= smooth_min_periods <= smooth_window")
+    commodity_dir = Path(commodity_dir)
+    index = pd.DatetimeIndex(pd.to_datetime(dates, errors="raise")).normalize()
+    index = pd.DatetimeIndex(sorted(index.unique()), name="date")
+    markets = {
+        symbol: _load_contract_market_data(commodity_dir / symbol)
+        for symbol in SOYBEAN_COMPLEX_SYMBOLS
+    }
+
+    def load_contract(year: int, month_code: str) -> pd.Series | None:
+        month_position = SEASONAL_CRUSH_MONTHS.index(month_code)
+        legs = []
+        for symbol in SOYBEAN_COMPLEX_SYMBOLS:
+            contract = f"{year}{SEASONAL_CRUSH_LEG_MONTHS[symbol][month_position]}"
+            frame = _contract_frame(markets[symbol], contract)
+            if frame.empty:
+                return None
+            legs.append(frame["settle"].rename(symbol))
+        joined = pd.concat(legs, axis=1)
+        return soybean_crush_usd_per_bushel(joined["ZS"], joined["ZM"], joined["ZL"])
+
+    first_year = min(index.year.min(), earliest_contract_year) if len(index) else earliest_contract_year
+    last_year = index.year.max() if len(index) else earliest_contract_year
+    raw_paths: dict[tuple[int, str], pd.Series] = {}
+    smooth_paths: dict[tuple[int, str], pd.Series] = {}
+    for year in range(max(first_year, earliest_contract_year), last_year + 1):
+        for month_code in SEASONAL_CRUSH_MONTHS:
+            raw = load_contract(year, month_code)
+            if raw is None:
+                continue
+            raw_paths[(year, month_code)] = raw
+            smooth_paths[(year, month_code)] = raw.rolling(
+                smooth_window, min_periods=smooth_min_periods, center=True
+            ).mean()
+
+    rows = []
+    for date in index:
+        year = date.year
+        current_code = CALENDAR_MONTH_CODES[date.month]
+        position = bisect_left(SEASONAL_CRUSH_MONTHS, current_code)
+        expiry_code = (
+            SEASONAL_CRUSH_MONTHS[(position + 1) % len(SEASONAL_CRUSH_MONTHS)]
+            if position < len(SEASONAL_CRUSH_MONTHS)
+            and current_code == SEASONAL_CRUSH_MONTHS[position]
+            else SEASONAL_CRUSH_MONTHS[position]
+        )
+        current = raw_paths.get((year, expiry_code))
+        raw_value = current.get(date, np.nan) if current is not None else np.nan
+        historical = []
+        comparison_day = 28 if date.day == 29 else date.day
+        for prior_year in range(
+            max(year - lookback_years, earliest_contract_year), year
+        ):
+            path = smooth_paths.get((prior_year, expiry_code))
+            if path is None:
+                continue
+            comparison_date = pd.Timestamp(prior_year, date.month, comparison_day)
+            available = path.loc[path.index >= comparison_date]
+            if not available.empty:
+                historical.append(float(available.iloc[0]))
+        median = float(np.median(historical)) if historical else np.nan
+        rows.append({
+            "date": date,
+            "seasonal_crush_contract": f"{year}{expiry_code}",
+            "raw": raw_value,
+            "median": median,
+            "adjusted": raw_value - median,
+        })
+    return pd.DataFrame(rows).set_index("date")
 
 
 def _contract_frame(market: pd.DataFrame, contract: str) -> pd.DataFrame:
