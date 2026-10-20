@@ -1,0 +1,14 @@
+{
+  "as_of": "2026-10-09",
+  "target_date": "2026-10-12",
+  "beta_mode": "legacy_daily_beta",
+  "production_method": "legacy",
+  "comparison_complete": false,
+  "comparison_error": "Command '['uv', 'run', 'python', '/Users/chenxu/Work/comm-ls/scripts/generate_metals_cached_beta_daily_targets.py', '--aum', '5000', '--as-of', '2026-10-09', '--target-date', '2026-10-12', '--current-positions', '/Users/chenxu/Work/comm-ls/stats/2026-10-09/metals_positions_attributed.csv', '--output-dir', '/var/folders/g9/s0dqxvt557l2gr1n1d9z_r7m0000gn/T/comm-ls-beta-2026-10-12-rn3jt1yc/cached/targets-metals']' returned non-zero exit status 1.",
+  "crypto_aum_usd": 4000.0,
+  "staged_package": "/var/folders/g9/s0dqxvt557l2gr1n1d9z_r7m0000gn/T/comm-ls-beta-2026-10-12-rn3jt1yc/legacy/targets-cl/2026-10-12",
+  "comparison": null,
+  "legacy_package": "/var/folders/g9/s0dqxvt557l2gr1n1d9z_r7m0000gn/T/comm-ls-beta-2026-10-12-rn3jt1yc/legacy/targets-cl/2026-10-12",
+  "cached_package": "/var/folders/g9/s0dqxvt557l2gr1n1d9z_r7m0000gn/T/comm-ls-beta-2026-10-12-rn3jt1yc/cached/targets-cl/2026-10-12",
+  "previous_package_backup": "/var/folders/g9/s0dqxvt557l2gr1n1d9z_r7m0000gn/T/comm-ls-beta-2026-10-12-rn3jt1yc/production_before/targets-cl/2026-10-12"
+}

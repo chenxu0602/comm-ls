@@ -209,6 +209,7 @@ def validate_config(config: dict[str, SleeveConfig]) -> None:
             "shipping_sticky_accel",
             "service_asymmetric_z",
             "service_volatility_hysteresis",
+            "cro_precomputed",
         }:
             raise ValueError(f"{sleeve} has unknown signal rule {cfg.signal_rule}")
         if cfg.signal_rule == "shipping_sticky" and SHIPPING_MOMENTUM_FEATURE not in cfg.auxiliary_features:
@@ -478,6 +479,8 @@ def signal_from_features(features: pd.DataFrame, cfg: SleeveConfig) -> pd.Series
         raise KeyError(f"Missing features for {cfg.signal_rule}: {missing}")
     if cfg.signal_rule == "hysteresis":
         return hysteresis_signal(features[cfg.feature], cfg)
+    if cfg.signal_rule == "cro_precomputed":
+        return features[cfg.feature].fillna(0)
     if cfg.signal_rule == "asymmetric_hysteresis":
         return asymmetric_hysteresis_signal(features[cfg.feature], cfg)
     if cfg.signal_rule == "band_hysteresis":

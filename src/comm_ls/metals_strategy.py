@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from bisect import bisect_left
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Mapping
 
@@ -9,6 +9,7 @@ import numpy as np
 import pandas as pd
 
 from comm_ls.cl_v32_strategy import fixed_hold_position
+from comm_ls.live_allocation_policy import ALLOCATION_EFFECTIVE_DATE
 
 
 METALS_MAX_SINGLE_NAME_WEIGHT = 0.12
@@ -54,7 +55,7 @@ class MetalsSleeveConfig:
 # notebooks/backtest_mt_v43.ipynb after the 2026-09-02 review.
 METALS_SLEEVE_CONFIG: dict[str, MetalsSleeveConfig] = {
     "hg_gc_gap_gc_carry_iron": MetalsSleeveConfig(
-        weight=0.20,
+        weight=0.15,
         tickers=("BHP", "RIO", "VALE", "FSUGY"),
         internal_weights={"BHP": 0.40, "RIO": 0.30, "VALE": 0.20, "FSUGY": 0.10},
         signal_rule="dual_feature_hysteresis",
@@ -74,7 +75,7 @@ METALS_SLEEVE_CONFIG: dict[str, MetalsSleeveConfig] = {
         },
     ),
     "sco_vol_gc_hg_accel_miners": MetalsSleeveConfig(
-        weight=0.25,
+        weight=0.20,
         tickers=("BHP", "RIO", "VALE", "SCCO"),
         internal_weights={"BHP": 0.30, "RIO": 0.40, "VALE": 0.10, "SCCO": 0.20},
         signal_rule="sco_vol_gc_hg_combo",
@@ -112,7 +113,7 @@ METALS_SLEEVE_CONFIG: dict[str, MetalsSleeveConfig] = {
         },
     ),
     "sco_vol_miners": MetalsSleeveConfig(
-        weight=0.15,
+        weight=0.25,
         tickers=("BHP", "RIO", "VALE", "SCCO"),
         internal_weights={"BHP": 0.30, "RIO": 0.30, "VALE": 0.20, "SCCO": 0.20},
         signal_rule="sco_vol_regime_pulse",
@@ -156,6 +157,16 @@ METALS_SLEEVE_CONFIG: dict[str, MetalsSleeveConfig] = {
         params={"threshold": 0.02, "side_mult": -1.0},
     ),
 }
+
+
+def metals_config_for_target(target_date):
+    """Preserve earlier session weights when regenerating historical packages."""
+    if pd.Timestamp(target_date).normalize() >= ALLOCATION_EFFECTIVE_DATE:
+        return METALS_SLEEVE_CONFIG
+    previous = {"hg_gc_gap_gc_carry_iron": .20,
+                "sco_vol_gc_hg_accel_miners": .25, "sco_vol_miners": .15}
+    return {name: replace(cfg, weight=previous.get(name, cfg.weight))
+            for name, cfg in METALS_SLEEVE_CONFIG.items()}
 
 
 @dataclass(frozen=True)
@@ -817,8 +828,9 @@ def build_component_targets(
     *,
     as_of: pd.Timestamp,
     target_date: pd.Timestamp,
-    config: Mapping[str, MetalsSleeveConfig] = METALS_SLEEVE_CONFIG,
+    config: Mapping[str, MetalsSleeveConfig] | None = None,
 ) -> pd.DataFrame:
+    config = metals_config_for_target(target_date) if config is None else config
     rows: list[dict[str, object]] = []
     for component, cfg in config.items():
         known_signal = pd.to_numeric(

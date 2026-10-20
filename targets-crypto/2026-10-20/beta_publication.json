@@ -1,0 +1,14 @@
+{
+  "as_of": "2026-10-19",
+  "target_date": "2026-10-20",
+  "beta_mode": "legacy_daily_beta",
+  "production_method": "legacy",
+  "comparison_complete": true,
+  "comparison_error": null,
+  "crypto_aum_usd": 4000.0,
+  "staged_package": "/var/folders/g9/s0dqxvt557l2gr1n1d9z_r7m0000gn/T/comm-ls-beta-2026-10-20-4i1_am1h/legacy/targets-crypto/2026-10-20",
+  "comparison": "/var/folders/g9/s0dqxvt557l2gr1n1d9z_r7m0000gn/T/comm-ls-beta-2026-10-20-4i1_am1h/comparison.csv",
+  "legacy_package": "/var/folders/g9/s0dqxvt557l2gr1n1d9z_r7m0000gn/T/comm-ls-beta-2026-10-20-4i1_am1h/legacy/targets-crypto/2026-10-20",
+  "cached_package": "/var/folders/g9/s0dqxvt557l2gr1n1d9z_r7m0000gn/T/comm-ls-beta-2026-10-20-4i1_am1h/cached/targets-crypto/2026-10-20",
+  "previous_package_backup": "/var/folders/g9/s0dqxvt557l2gr1n1d9z_r7m0000gn/T/comm-ls-beta-2026-10-20-4i1_am1h/production_before/targets-crypto/2026-10-20"
+}

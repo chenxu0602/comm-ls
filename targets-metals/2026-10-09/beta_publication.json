@@ -1,0 +1,11 @@
+{
+  "as_of": "2026-10-08",
+  "target_date": "2026-10-09",
+  "beta_mode": "legacy_daily_beta",
+  "production_method": "legacy",
+  "staged_package": "/var/folders/g9/s0dqxvt557l2gr1n1d9z_r7m0000gn/T/comm-ls-beta-2026-10-09-31i2mpxo/legacy/targets-metals/2026-10-09",
+  "comparison": "/var/folders/g9/s0dqxvt557l2gr1n1d9z_r7m0000gn/T/comm-ls-beta-2026-10-09-31i2mpxo/comparison.csv",
+  "legacy_package": "/var/folders/g9/s0dqxvt557l2gr1n1d9z_r7m0000gn/T/comm-ls-beta-2026-10-09-31i2mpxo/legacy/targets-metals/2026-10-09",
+  "cached_package": "/var/folders/g9/s0dqxvt557l2gr1n1d9z_r7m0000gn/T/comm-ls-beta-2026-10-09-31i2mpxo/cached/targets-metals/2026-10-09",
+  "previous_package_backup": "/var/folders/g9/s0dqxvt557l2gr1n1d9z_r7m0000gn/T/comm-ls-beta-2026-10-09-31i2mpxo/production_before/targets-metals/2026-10-09"
+}

@@ -90,7 +90,7 @@ PAIR_RESEARCH_CONFIG = {
         'stock_a_groups': ('refiner1','refiner2','refiner3'),
         'etf_a': ('CRAK',),
         'etf_b': ('IEO','XOP'),
-        'futures': ('CL','XB','HO'),
+        'futures': ('CL','XB','HO','NG'),
         'signals': 'refinery crack; CL curve; Brent-WTI companion features',
         'etf_quality': 'good_with_business_overlap',
     },
@@ -102,7 +102,7 @@ PAIR_RESEARCH_CONFIG = {
         'stock_a_groups': ('refiner1','refiner2','refiner3'),
         'etf_a': ('CRAK',),
         'etf_b': ('BOAT',),
-        'futures': ('CL','XB','HO'),
+        'futures': ('CL','XB','HO','NG'),
         'signals': 'refinery crack plus separately sourced VLCC freight/TCE',
         'etf_quality': 'poor_BOAT_is_broad_shipping',
     },
@@ -185,6 +185,32 @@ PAIR_ALIASES = {
     '3': 'product_tanker_vs_vlcc', '4': 'heavy_refiner_vs_canadian_heavy',
     '5': 'services_vs_producer', '6': 'refiner_vs_chemical',
 }
+
+
+# Research-only stock pairs; basket alternatives also have single-name controls.
+_METAL_PAIRS = {
+    'fcx_vs_aa': (('FCX',), ('AA',), ('LME_CA','LME_AH'), 'copper_vs_aluminum'),
+    'fcx_vs_bhp': (('FCX',), ('BHP',), ('HG','SCO'), 'copper_vs_iron'),
+    'fcx_vs_rio': (('FCX',), ('RIO',), ('HG','SCO'), 'copper_vs_iron'),
+    'fcx_vs_bhp_rio': (('FCX',), ('BHP','RIO'), ('HG','SCO'), 'copper_vs_iron'),
+    'teck_vs_scco': (('TECK',), ('SCCO',), ('LME_ZS','LME_CA'), 'zinc_vs_copper'),
+    'teck_vs_fcx': (('TECK',), ('FCX',), ('LME_ZS','LME_CA'), 'zinc_vs_copper'),
+    'teck_vs_scco_fcx': (('TECK',), ('SCCO','FCX'), ('LME_ZS','LME_CA'), 'zinc_vs_copper'),
+    'fcx_vs_nem': (('FCX',), ('NEM',), ('HG','GC'), 'copper_vs_gold'),
+    'fcx_vs_aem': (('FCX',), ('AEM',), ('HG','GC'), 'copper_vs_gold'),
+    'fcx_vs_nem_aem': (('FCX',), ('NEM','AEM'), ('HG','GC'), 'copper_vs_gold'),
+    'paas_vs_nem': (('PAAS',), ('NEM',), ('SI','GC'), 'silver_vs_gold'),
+    'paas_vs_aem': (('PAAS',), ('AEM',), ('SI','GC'), 'silver_vs_gold'),
+    'paas_vs_nem_aem': (('PAAS',), ('NEM','AEM'), ('SI','GC'), 'silver_vs_gold'),
+}
+for _name, (_a, _b, _sources, _signal) in _METAL_PAIRS.items():
+    PAIR_RESEARCH_CONFIG[_name] = {
+        'label': _name, 'basket_a': _a, 'basket_b': _b,
+        'etf_a': (), 'etf_b': (),
+        'futures': tuple(s for s in _sources if not s.startswith('LME_')),
+        'metal_sources': _sources, 'metal_signal': _signal,
+        'signals': _signal, 'etf_quality': 'stock_baskets_only',
+    }
 
 
 def project_root():
@@ -390,6 +416,57 @@ def load_futures_bundle(symbols, *, root=None, family='_2', start=None, end=None
             for s in symbols}
 
 
+def load_lme_data(symbol, *, root=None, start=None, end=None):
+    """LME cash/3m observations, not a chained futures series or timed signal."""
+    symbol = symbol.upper().removeprefix('LME_')
+    if symbol not in ('CA','AH','ZS','NI','PB'):
+        raise ValueError(f'Unsupported LME symbol: {symbol}')
+    frame = _read(Path(root or project_root()) / f'data/comm/LME/{symbol}.csv')
+    for col in ('cash','3m'):
+        frame[col] = pd.to_numeric(frame[col], errors='raise')
+        if frame[col].dropna().le(0).any():
+            raise ValueError(f'Nonpositive LME {symbol} {col}')
+    frame['curve_log_3m_cash'] = np.log(frame['3m'] / frame['cash'])
+    frame.attrs['timing'] = 'Source dates only; publication time unavailable. Not same-day tradable.'
+    return frame.loc[start:end]
+
+
+def load_metal_pair_signals(sources, *, root=None, family='_2', start=None, end=None):
+    """Relative commodity changes on source dates; no gap fill or roll-price diff.
+
+    LME comparisons use same-unit 3m prices. Chained futures comparisons use
+    original-contract log returns, not changes in rolling M0 settlement levels.
+    No trade direction or timestamp-safe equity signal is chosen here.
+    """
+    frames = [load_lme_data(s,root=root,end=end) if s.startswith('LME_')
+              else load_fut_continuous_data(s,root=root,family=family,end=end)
+              for s in sources]
+    out = pd.DataFrame(index=frames[0].index.union(frames[1].index).sort_values())
+    for side, source, frame in zip(('a','b'),sources,frames):
+        if source.startswith('LME_'):
+            out[f'{side}_price_3m'] = frame['3m']
+            out[f'{side}_curve_log_3m_cash'] = frame['curve_log_3m_cash']
+            out[f'{side}_log_return'] = np.log(frame['3m']).diff()
+        else:
+            out[f'{side}_log_return'] = pd.to_numeric(frame['m0_ret'],errors='raise')
+            out[f'{side}_carry'] = frame['carry']
+            if 'arrival' in frame:
+                out[f'{side}_arrival'] = frame['arrival']
+    if all(s.startswith('LME_') for s in sources):
+        out['log_price_ratio'] = np.log(out.a_price_3m / out.b_price_3m)
+        out['curve_difference'] = out.a_curve_log_3m_cash - out.b_curve_log_3m_cash
+    else:
+        out['carry_difference'] = out.a_carry - out.b_carry
+    out['relative_log_return'] = out.a_log_return - out.b_log_return
+    for horizon in (5,10,20,63):
+        out[f'relative_change_{horizon}d'] = out.relative_log_return.rolling(
+            horizon, min_periods=horizon).sum()
+    out.attrs.update(source_a=sources[0],source_b=sources[1],
+                     timing='Source-date research only. Respect arrivals and use a conservative lag for LME.',
+                     direction='Not selected; historical company exposures must be reviewed.')
+    return out.loc[start:end]
+
+
 def load_refinery_crack_data(*, root=None, start=None, end=None):
     """Load canonical point-in-time crack signals with their availability timestamp."""
     path = Path(root or project_root())/'data/processed/refinery_crack_signals.parquet'
@@ -444,21 +521,28 @@ def _contract_settle(path):
 
 def _calendar_crush_variant(root, expiries, previous_year_count):
     """Port the executed backtest_agri_v43 generate_crush calendar stitching."""
+    from comm_ls.commodity import _load_contract_market_data
+    from comm_ls.soybean_complex import _contract_frame
+
     data_dir = Path(root)/'data/comm'
-    years = sorted({int(path.stem[:4]) for path in (data_dir/'ZM').glob('?????.csv')
-                    if len(path.stem)==5 and path.stem[:4].isdigit()
-                    and int(path.stem[:4]) >= 2010})
+    # Use the same settlement/source-cutover policy as matched and seasonal
+    # crush. Historical CSVs alone stop at the Bloomberg/live boundary.
+    markets = {symbol: _load_contract_market_data(data_dir/symbol)
+               for symbol in ('ZM','ZL','ZS')}
+    years = sorted({int(contract[:4]) for contract in markets['ZM']['contract'].dropna()
+                    if len(contract)==5 and contract[:4].isdigit()
+                    and int(contract[:4]) >= 2010})
     pieces=[]; previous_end=None
     for year in years:
         for i, expiry_mmdd in enumerate(expiries):
             names = {symbol:f'{year}{_CRUSH_MONTHS[symbol][i]}'
                      for symbol in ('ZM','ZL','ZS')}
-            paths = {symbol:data_dir/symbol/f'{contract}.csv'
-                     for symbol,contract in names.items()}
-            if not all(path.exists() for path in paths.values()):
+            frames = {symbol: _contract_frame(markets[symbol], contract)
+                      for symbol,contract in names.items()}
+            if any(frame.empty for frame in frames.values()):
                 continue
-            legs = pd.concat({symbol.lower():_contract_settle(path)
-                              for symbol,path in paths.items()},axis=1)
+            legs = pd.concat({symbol.lower():frame['settle']
+                              for symbol,frame in frames.items()},axis=1)
             expiry_year = year-1 if i < previous_year_count else year
             expiry = pd.Timestamp(f'{expiry_year}-{expiry_mmdd}')
             eligible = legs.index < expiry if previous_end is None else (
@@ -559,6 +643,57 @@ def load_vlcc_weekly_data(*, root=None, start=None, end=None):
     frame = frame.set_index('usable_from_date').sort_index().loc[start:end]
     frame.attrs.update(source=str(path),excluded_without_usable_date=unavailable)
     return frame
+
+
+def load_clean_vs_crude_weekly_data(*, root=None, start=None, end=None):
+    """Baltic TC2/TC14 vs TD3C/TD15/TD22, indexed by first usable date.
+
+    Preserve incomplete published rows; undated missing reports are counted in
+    attrs. Source values are not repaired, interpolated or winsorized here.
+    """
+    path = Path(root or project_root()) / 'data/baltic/baltic_clean_vs_crude_weekly_model.csv'
+    frame = pd.read_csv(path)
+    for col in ('publication_date', 'market_asof_date', 'usable_from_date'):
+        frame[col] = pd.to_datetime(frame[col], errors='raise').dt.normalize()
+    unavailable = int(frame.usable_from_date.isna().sum())
+    frame = frame.loc[frame.usable_from_date.notna()].copy()
+    if (frame.publication_date.isna().any()
+            or (frame.usable_from_date <= frame.publication_date).any()
+            or (frame.market_asof_date > frame.publication_date).any()):
+        raise ValueError('Invalid Baltic publication/availability chronology')
+    for col in ('clean_complete', 'vlcc_complete', 'pair_complete'):
+        frame[col] = frame[col].astype(str).str.lower().eq('true')
+    if frame.usable_from_date.duplicated().any():
+        raise ValueError(f'Duplicate Baltic usable dates: {path}')
+    frame = frame.set_index('usable_from_date').sort_index().loc[start:end]
+    frame.attrs.update(source=str(path), excluded_without_usable_date=unavailable)
+    return frame
+
+
+def align_baltic_weekly_to_sessions(weekly, sessions, *, max_age_days=7):
+    """Backward-only as-of join; expire at age >= max_age_days (calendar days).
+
+    A newly published incomplete row invalidates the pair immediately. No
+    backfill before availability, and no per-column ffill across missing routes.
+    usable_from_date is already the conservative signal-availability date;
+    callers must separately apply their execution/PnL delay.
+    """
+    if max_age_days <= 0:
+        raise ValueError('max_age_days must be positive')
+    dates = pd.DatetimeIndex(sessions, name='date')
+    if not dates.is_unique or dates.hasnans:
+        raise ValueError('Sessions must be unique nonmissing dates')
+    right = weekly.rename_axis('usable_from_date').reset_index().sort_values('usable_from_date')
+    out = pd.merge_asof(pd.DataFrame({'date': dates}).sort_values('date'),
+                        right, left_on='date', right_on='usable_from_date',
+                        direction='backward').set_index('date')
+    out['age_days'] = (out.index.to_series() - out.usable_from_date).dt.days
+    out['signal_valid'] = (out.pair_complete.eq(True)
+                           & out.age_days.ge(0) & out.age_days.lt(max_age_days))
+    for col in ('clean_minus_vlcc_usd_day', 'log_clean_minus_vlcc'):
+        out[col] = out[col].where(out.signal_valid)
+    out.attrs.update(weekly.attrs, max_age_days=max_age_days)
+    return out
 
 
 def describe_pair_research():
@@ -745,12 +880,20 @@ def load_pair_research(pair, *, mode='stocks', etf_a=None, etf_b=None,
     futures = (load_futures_bundle(cfg['futures'],root=root,family=family,
                                    start=start,end=end) if include_futures else {})
     auxiliary = {}
+    if cfg.get('metal_sources'):
+        if include_futures:
+            for source in cfg['metal_sources']:
+                if source.startswith('LME_'):
+                    futures[source] = load_lme_data(source,root=root,start=start,end=end)
+        if include_auxiliary:
+            auxiliary['metal_relative'] = load_metal_pair_signals(
+                cfg['metal_sources'],root=root,family=family,start=start,end=end)
     named_refiner_pair = re.fullmatch(
         r'refiner[123]?_vs_(refiner[123]?|producer[123]?|vlcc|chemical[123]?)', key
     )
     if include_auxiliary and (
         named_refiner_pair is not None
-        or key == 'heavy_refiner_vs_canadian_heavy'
+        or key in ('heavy_refiner_vs_canadian_heavy', 'product_tanker_vs_vlcc')
     ):
         auxiliary['refinery_crack'] = load_refinery_crack_data(
             root=root,start=start,end=end)
@@ -773,6 +916,13 @@ def load_pair_research(pair, *, mode='stocks', etf_a=None, etf_b=None,
     ):
         auxiliary['vlcc_weekly'] = load_vlcc_weekly_data(
             root=root,start=start,end=end)
+    if include_auxiliary and key == 'product_tanker_vs_vlcc':
+        # Load pre-start history as well so a valid prior-week observation can
+        # seed the first requested session without looking forward.
+        weekly = load_clean_vs_crude_weekly_data(root=root, end=end)
+        auxiliary['clean_vs_crude_weekly'] = weekly.loc[start:end]
+        auxiliary['clean_vs_crude_daily'] = align_baltic_weekly_to_sessions(
+            weekly, spread.index)
     return {'a':a.loc[start:end],'b':b.loc[start:end],'spread':spread,
             'futures':futures,'auxiliary':auxiliary,
             'config':dict(cfg),'selected':selected,

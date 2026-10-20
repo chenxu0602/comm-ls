@@ -246,6 +246,25 @@ def _build_signal(frame: pd.DataFrame, builder: str) -> pd.Series:
     return long_state.ffill().fillna(0.0) + short_state.ffill().fillna(0.0)
 
 
+def _validate_live_inputs(frame: pd.DataFrame, builder: str, smoothing: int) -> None:
+    """Reject incomplete inputs used by the latest live signal window."""
+    columns = REQUIRED_FEATURES_BY_BUILDER[builder]
+    inputs = frame.loc[:, list(columns)].copy()
+    if builder == "btc_momentum_vol_carry":
+        inputs["vol_change_5d"] = frame["feature_value__realized_vol_20d"].diff(5)
+    elif builder == "hg_carry_and_power":
+        inputs = frame[["hg_carry_chg_20d", "ng_power_curve"]].copy()
+        inputs["power_change_5d"] = frame.ng_power_curve.diff(5)
+        inputs["power_change_20d"] = frame.ng_power_curve.diff(20)
+    recent = inputs.tail(max(1, smoothing))
+    invalid = ~np.isfinite(recent.to_numpy(dtype=float))
+    if invalid.any():
+        examples = [(str(recent.index[i]), recent.columns[j])
+                    for i, j in zip(*np.where(invalid))]
+        raise ValueError(f"Incomplete live signal inputs for {builder}: {examples}. "
+                         "Review source data and rebuild signals/caches before generating targets.")
+
+
 def build_component_targets(
     *,
     as_of: pd.Timestamp,
@@ -285,6 +304,7 @@ def build_component_targets(
                 frames[reference_ticker].index,
             )
             shared_driver = shared_driver.loc[shared_driver.index <= as_of]
+            _validate_live_inputs(shared_driver, cfg.signal_builder, cfg.signal_smoothing)
             shared_signal = _build_signal(shared_driver, cfg.signal_builder)
             if cfg.signal_smoothing > 1:
                 shared_signal = shared_signal.rolling(cfg.signal_smoothing).mean()
@@ -298,6 +318,7 @@ def build_component_targets(
                 latest_dates[f"{symbol.upper()}_{sleeve}"] = feature_dates.iloc[-1]
         else:
             for ticker, frame in frames.items():
+                _validate_live_inputs(frame, cfg.signal_builder, cfg.signal_smoothing)
                 sleeve_signals[ticker] = _build_signal(frame, cfg.signal_builder)
 
         signals = pd.DataFrame(sleeve_signals).sort_index()

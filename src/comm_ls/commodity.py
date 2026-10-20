@@ -763,6 +763,23 @@ def load_carry_file(path: Path) -> pd.DataFrame:
             "--commodity-dir data/comm --output-dir data/comm/carry_data_2 "
             "--overwrite"
         )
+    # Carry_data_2 keeps shadow-only curve features (including NG U-Z), while
+    # the operator's corrected BTC.csv is the reviewed source for this gap.
+    # Overlay only these dates and only the carry level; preserve all shadow
+    # contract/activity columns used by the rest of the feature pipeline.
+    if path.stem.upper() == "BTC" and path.parent.name == "carry_data_2":
+        reviewed_path = path.parent.parent / "carry_data" / "BTC.csv"
+        if reviewed_path.exists():
+            reviewed = pd.read_csv(reviewed_path, usecols=["date", "carry"])
+            reviewed["date"] = pd.to_datetime(reviewed["date"], errors="coerce")
+            reviewed["carry"] = pd.to_numeric(reviewed["carry"], errors="coerce")
+            gap_dates = pd.to_datetime(["2026-09-25", "2026-09-28", "2026-09-29"])
+            corrections = reviewed.loc[reviewed["date"].isin(gap_dates)].dropna(subset=["carry"])
+            if len(corrections) != len(gap_dates):
+                raise ValueError("Reviewed BTC.csv must have valid carry on Sep 25, 28, and 29")
+            correction_map = corrections.set_index("date")["carry"]
+            target = df["date"].isin(gap_dates)
+            df.loc[target, "carry"] = df.loc[target, "date"].map(correction_map).to_numpy()
     return df
 
 

@@ -1,0 +1,14 @@
+{
+  "as_of": "2026-10-12",
+  "target_date": "2026-10-13",
+  "beta_mode": "legacy_daily_beta",
+  "production_method": "legacy",
+  "comparison_complete": true,
+  "comparison_error": null,
+  "crypto_aum_usd": 4000.0,
+  "staged_package": "/var/folders/g9/s0dqxvt557l2gr1n1d9z_r7m0000gn/T/comm-ls-beta-2026-10-13-p40p8pvg/legacy/targets-cl/2026-10-13",
+  "comparison": "/var/folders/g9/s0dqxvt557l2gr1n1d9z_r7m0000gn/T/comm-ls-beta-2026-10-13-p40p8pvg/comparison.csv",
+  "legacy_package": "/var/folders/g9/s0dqxvt557l2gr1n1d9z_r7m0000gn/T/comm-ls-beta-2026-10-13-p40p8pvg/legacy/targets-cl/2026-10-13",
+  "cached_package": "/var/folders/g9/s0dqxvt557l2gr1n1d9z_r7m0000gn/T/comm-ls-beta-2026-10-13-p40p8pvg/cached/targets-cl/2026-10-13",
+  "previous_package_backup": "/var/folders/g9/s0dqxvt557l2gr1n1d9z_r7m0000gn/T/comm-ls-beta-2026-10-13-p40p8pvg/production_before/targets-cl/2026-10-13"
+}

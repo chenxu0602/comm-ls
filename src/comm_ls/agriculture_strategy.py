@@ -10,6 +10,8 @@ from comm_ls.etf_research import load_soybean_crush_data, rolling_betas
 
 
 ROOT = Path(".")
+AGRICULTURE_PRODUCTION_START_DATE = pd.Timestamp("2026-10-02")
+AGRICULTURE_PRODUCTION_AUM = 2_000.0
 DEFAULT_CACHE_PATH = (
     ROOT / "data/cache/feature_return_observation_v1/ZS-soybean-common_2.parquet"
 )
@@ -145,12 +147,32 @@ def _state_signal(crush: pd.Series, *, version: str, index: pd.Index) -> pd.Seri
 
 
 def _target_from_signal(signal: pd.Series, *, as_of: pd.Timestamp) -> tuple[float, pd.Timestamp]:
+    if as_of not in signal.index or not np.isfinite(signal.loc[as_of]):
+        raise ValueError(f"Missing Agriculture target signal/beta on {as_of.date()}; refusing a stale target")
     eligible = signal.loc[signal.index <= as_of].dropna()
     if eligible.empty:
         raise ValueError(f"No Agriculture signal at or before {as_of.date()}")
     # Notebook calc_pos_with_future(..., delay=1) makes the next session's
     # target equal to the latest available signal.
     return float(eligible.iloc[-1]), pd.Timestamp(eligible.index[-1]).normalize()
+
+
+def _validate_live_crush_inputs(value, index, *, component, field, version, as_of):
+    """Require the actual field and its decision lookbacks, even for a flat state."""
+    index = index[index <= as_of]
+    if len(index) < 21 or index[-1] != as_of:
+        raise ValueError(f"{component}: Agriculture stock calendar must cover {as_of.date()} and 21 sessions")
+    aligned = pd.to_numeric(value, errors="coerce").reindex(index)
+    recent = aligned.iloc[-21:]
+    bad = recent.index[~np.isfinite(recent)]
+    if len(bad):
+        raise ValueError(
+            f"Missing Agriculture signal inputs for {component}/{field}: "
+            f"{[str(day.date()) for day in bad[:5]]}. "
+            "Review ZS/ZM/ZL contract/live settles and rebuild inputs; do not fill missing crush with zero."
+        )
+    if version == "2" and not np.isfinite(aligned.rolling(252*3, min_periods=252).std().iloc[-1]):
+        raise ValueError(f"{component}/{field}: insufficient history for the 252-observation volatility scale")
 
 
 def build_component_targets(
@@ -178,6 +200,9 @@ def build_component_targets(
         key = (ticker, return_method)
         if key not in stock_cache:
             stock_cache[key] = _load_stock(cache_path, ticker, [return_method]).loc[:as_of]
+            frame = stock_cache[key]
+            if as_of not in frame.index or not np.isfinite(frame.loc[as_of, return_method]):
+                raise ValueError(f"Missing Agriculture {ticker}/{return_method} on {as_of.date()}")
         return stock_cache[key]
 
     rows: list[dict[str, object]] = []
@@ -186,6 +211,10 @@ def build_component_targets(
         if sleeve.kind == "crush_vol":
             for ticker, basket_weight in {"ADM": 0.60, "BG": 0.40}.items():
                 frame = stock(ticker, sleeve.return_method)
+                _validate_live_crush_inputs(
+                    crush_series, frame.index, component=component,
+                    field=sleeve.field, version="crush_vol", as_of=as_of,
+                )
                 signal = _state_signal(
                     crush_series,
                     version="crush_vol",
@@ -207,6 +236,10 @@ def build_component_targets(
         primary = stock(sleeve.primary, sleeve.return_method)
         secondary = stock(sleeve.secondary, sleeve.return_method)
         common = primary.index.union(secondary.index).sort_values()
+        _validate_live_crush_inputs(
+            crush_series, common, component=component,
+            field=sleeve.field, version=sleeve.version, as_of=as_of,
+        )
         base = _state_signal(crush_series, version=sleeve.version, index=common)
         returns = pd.concat(
             {
@@ -247,6 +280,10 @@ def build_component_targets(
             pd.Timestamp(frame.index.max()).normalize() for frame in stock_cache.values()
         ),
     }
+    latest_dates.update({
+        f"soybean_crush_{field}": pd.Timestamp(crush[field].last_valid_index()).normalize()
+        for field in sorted(required_fields)
+    })
     source = Path(crush.attrs.get("source", "data/processed/soybean_complex_signals_2.parquet"))
     return targets, latest_dates, {"soybean_crush": source, "stock_cache": cache_path}
 

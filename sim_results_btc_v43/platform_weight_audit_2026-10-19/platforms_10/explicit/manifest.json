@@ -1,0 +1,17 @@
+{
+  "strategy": "crypto",
+  "beta_equity": "data/processed/equity_processed.parquet",
+  "positions": "/Users/chenxu/Work/comm-ls/sim_results_btc_v43/platform_weight_audit_2026-10-19/platforms_10/positions.csv",
+  "implicit_pnl": "/Users/chenxu/Work/comm-ls/sim_results_btc_v43/platform_weight_audit_2026-10-19/platforms_10/weekly_implicit.csv",
+  "positions_dir": "sim_results_clv43",
+  "suffix": "_2",
+  "cro_weight": 0.1,
+  "start": "2020-01-01",
+  "as_of": "2026-10-19",
+  "aum": 4000.0,
+  "price_dir": "data/equity/yfinance",
+  "stock_cost_bps": 25.0,
+  "hedge_cost_bps": 25.0,
+  "output_dir": "/Users/chenxu/Work/comm-ls/sim_results_btc_v43/platform_weight_audit_2026-10-19/platforms_10/explicit",
+  "export_sleeve_attribution": false
+}

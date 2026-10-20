@@ -178,6 +178,14 @@ def _normalize_source_frame(
     out["open_interest"] = _numeric(frame, "open int")
     out["source"] = source
     out = out[out["contract"].map(_valid_contract_name)].dropna(subset=["date"])
+    # Some vendor contract files append a next-session placeholder containing
+    # only date and zero volume.  It is not a market observation and must not
+    # extend the carry calendar.  Retain genuine partial updates (positive
+    # activity or any price field) so the downstream fail-closed checks still
+    # catch a latest row whose settlement has not arrived yet.
+    has_price = out[["settle", "open", "high", "low"]].notna().any(axis=1)
+    has_activity = out["volume"].gt(0) | out["open_interest"].gt(0)
+    out = out.loc[has_price | has_activity]
     if out.empty:
         return out
     if source == "live":
