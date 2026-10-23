@@ -33,6 +33,33 @@ STOCK_BASKET_GROUPS = {
 # Candidate lists are alternatives, not portfolio weights.  The first ETF is
 # the default used by load_pair_research; callers can select another explicitly.
 PAIR_RESEARCH_CONFIG = {
+    'tsn_vs_adm': {
+        'label': 'Tyson diversified protein processor vs ADM grain processor',
+        'basket_a': ('TSN',),
+        'basket_b': ('ADM',),
+        'etf_a': (),
+        'etf_b': (),
+        'futures': ('HE', 'ZC', 'ZM'),
+        'signals': (
+            'protein processing versus grain processing/feed-cost hypothesis; '
+            'relative futures returns are diagnostics, not physical margins'
+        ),
+        'etf_quality': 'stock_baskets_only',
+    },
+    'tsn_vs_hrl': {
+        'label': 'Tyson diversified protein processor vs Hormel branded foods',
+        'basket_a': ('TSN',),
+        'basket_b': ('HRL',),
+        'etf_a': (),
+        'etf_b': (),
+        'futures': ('HE', 'ZC', 'ZM'),
+        'signals': (
+            'lean-hog processing and branded-food input-cost hypothesis; '
+            'corn/soybean-meal relative returns are diagnostics, not physical margins; '
+            'TSN and HRL are not a pure upstream/downstream chain'
+        ),
+        'etf_quality': 'stock_baskets_only',
+    },
     'milling1_vs_farm': {
         'label': 'ADM milling vs TSN farm/protein',
         'basket_a': STOCK_BASKET_GROUPS['milling1'],

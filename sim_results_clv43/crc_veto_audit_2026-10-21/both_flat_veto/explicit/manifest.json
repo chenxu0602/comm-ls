@@ -1,0 +1,17 @@
+{
+  "strategy": "cl",
+  "beta_equity": "data/processed/equity_processed.parquet",
+  "positions": null,
+  "implicit_pnl": "/Users/chenxu/Work/comm-ls/sim_results_clv43/crc_veto_audit_2026-10-21/both_flat_veto/no_saved_notebook_comparator.csv",
+  "positions_dir": "/Users/chenxu/Work/comm-ls/sim_results_clv43/crc_veto_audit_2026-10-21/both_flat_veto/positions",
+  "suffix": "_2",
+  "cro_weight": 0.1,
+  "start": "2012-01-01",
+  "as_of": "2026-10-21",
+  "aum": 15000.0,
+  "price_dir": "data/equity/yfinance",
+  "stock_cost_bps": 25.0,
+  "hedge_cost_bps": 25.0,
+  "output_dir": "/Users/chenxu/Work/comm-ls/sim_results_clv43/crc_veto_audit_2026-10-21/both_flat_veto/explicit",
+  "export_sleeve_attribution": true
+}

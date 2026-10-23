@@ -1,0 +1,7 @@
+Research only: no notebook, production weights, target packages, or input exports modified.
+CRC = saved crack_refiner_chem_pos export: crack_03, 30-session signal/vol, rolling-2 smoothing in current notebook. Gate is nonzero exported CRC gross, not its PnL.
+CRC flat => selected sleeves flat. Gate does NOT reverse trades or reallocate cash. Refiner group = refiner + psx_ref + cro; chemical veto covers entire chemical basket, although CRC chemical leg only represents its configured subset.
+Both CRC and baseline exports retain notebook timing. Apply gate at matching date; shared explicit engine lags resulting positions once. No lookahead or extra shift. A flat row dated 2026-10-19 affects return on 2026-10-20, not earlier losses.
+Missing CRC rows after coverage fail closed; pre-coverage baseline is unchanged. Same saved baseline sleeves, weights, post-netting cap and costs as shared engine. Recompute explicit hedges after veto, including stock/hedge costs and integer rounding.
+Live-method comparator is legacy daily beta. Cached beta comparison is NOT live approval. Integer simulation is ideal close rebalancing, not actual fills/buffers/40% child limits.
+Implicit uses shared engine conventions; candidate is not expected to match baseline notebook PnL. 2024+ is post-hoc, NOT clean OOS. Saved current data are not historical data vintages. Exclude borrow/dividend/impact realism claims. Gate churn can increase costs.

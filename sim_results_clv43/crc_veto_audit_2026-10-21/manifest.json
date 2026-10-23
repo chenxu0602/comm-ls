@@ -1,0 +1,56 @@
+{
+  "as_of": "2026-10-21",
+  "start": "2012-01-01",
+  "aum": 15000.0,
+  "scenarios": {
+    "baseline": [],
+    "chemical_flat_veto": [
+      "chemical"
+    ],
+    "refiner_group_flat_veto": [
+      "refiner",
+      "psx_ref",
+      "cro"
+    ],
+    "both_flat_veto": [
+      "chemical",
+      "refiner",
+      "psx_ref",
+      "cro"
+    ]
+  },
+  "sources": {
+    "chemical": {
+      "path": "/Users/chenxu/Work/comm-ls/sim_results_clv43/chemical_pos_2.csv",
+      "sha256": "833355c9929ac3e464bdd627fe2c1eb02349bcd509a4b0594ebb796a0815e425"
+    },
+    "shipping": {
+      "path": "/Users/chenxu/Work/comm-ls/sim_results_clv43/shipping_veto_pos_2.csv",
+      "sha256": "baee66c99b05c2dbeec652159b2e51162b4daea92833bc9ee165f0ab2543c8ca"
+    },
+    "refiner": {
+      "path": "/Users/chenxu/Work/comm-ls/sim_results_clv43/refiner_pos_2.csv",
+      "sha256": "4a7af8f73f2523a198cef9c9f6786bba37f594e279e94d8026a33dd019a3ff4e"
+    },
+    "psx_ref": {
+      "path": "/Users/chenxu/Work/comm-ls/sim_results_clv43/psx_ref_pos_2.csv",
+      "sha256": "8e7b8b83f1fe13039646b0d85c4bf522d08dd5f0dbd95ee5960157f3e59fcc5f"
+    },
+    "services": {
+      "path": "/Users/chenxu/Work/comm-ls/sim_results_clv43/service_pos_2.csv",
+      "sha256": "dc176f3fa34c31bdfe056016ceee5c19446f884d2380365aef5bf514af6a4aad"
+    },
+    "bwt": {
+      "path": "/Users/chenxu/Work/comm-ls/sim_results_clv43/bwt_pos_2.csv",
+      "sha256": "948c1dbfccdffbf18d70e66a568e633572f5195f096320c06499e73b376b0e7d"
+    },
+    "cro": {
+      "path": "/Users/chenxu/Work/comm-ls/sim_results_clv43/crack_refiner_only_pos_2.csv",
+      "sha256": "8a6c0ef47abd75cbed0dd15e9597778ade2cc6b77457ea1f507611717423f221"
+    },
+    "crc": {
+      "path": "/Users/chenxu/Work/comm-ls/sim_results_clv43/crack_refiner_chem_pos_2.csv",
+      "sha256": "7ba7089aea7b42361926b93e3bdf391aec57680a7ac8c62ef64c159e5aecbfb1"
+    }
+  }
+}
