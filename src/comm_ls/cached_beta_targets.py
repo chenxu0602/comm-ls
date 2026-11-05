@@ -138,6 +138,7 @@ def run_targets(strategy: str):
                     CL_V43_CACHE_SUFFIX, CL_V43_FEATURE_ALIGNMENT_MODE,
                     CL_V43_MAX_SINGLE_NAME_WEIGHT, CL_V43_SHIPPING_VETO_CONFIG,
                     CL_V43_SLEEVE_CONFIG,
+                    live_config_for_target,
                 )
                 module.main(
                     config=CL_V43_SLEEVE_CONFIG,
@@ -151,6 +152,7 @@ def run_targets(strategy: str):
                     require_feature_cache=True, shipping_veto_config=CL_V43_SHIPPING_VETO_CONFIG,
                     live_suspensions={"fuel": "2026-09-17", "metals": "2026-09-17"},
                     live_additions={"cro": (CRO_EFFECTIVE_DATE, CRO_CONFIG)},
+                    live_config_for_target=live_config_for_target,
                 )
             else:
                 module.main()

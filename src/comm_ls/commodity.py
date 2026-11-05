@@ -5,6 +5,7 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+from comm_ls.china_futures import CHINA_ACTIVE_MONTHS
 
 
 REQUIRED_CARRY_COLUMNS = {
@@ -70,6 +71,7 @@ ACTIVE_CONTRACT_MONTHS_BY_SYMBOL = {
     "PD": ALL_CONTRACT_MONTHS,
     "PT": ALL_CONTRACT_MONTHS,
 }
+ACTIVE_CONTRACT_MONTHS_BY_SYMBOL.update(CHINA_ACTIVE_MONTHS)
 
 # CL and Brent second-year April/May contracts are typically much thinner than
 # the following June anchor.  Exclude only those deferred observations; the
@@ -369,11 +371,16 @@ def _resolve_contract_duplicates(frame: pd.DataFrame) -> pd.DataFrame:
 
 
 def _live_contract_market_data_path(symbol_dir: Path) -> Path:
-    return symbol_dir.parent / "live_data" / f"{symbol_dir.name.upper()}.csv"
+    from comm_ls.commodity_paths import commodity_root_from_symbol, live_symbol
+    root = commodity_root_from_symbol(symbol_dir)
+    preferred = root / 'live_data' / f'{live_symbol(symbol_dir.name)}.csv'
+    legacy = root / 'live_data' / f'{symbol_dir.name.upper()}.csv'
+    return preferred if preferred.exists() else legacy
 
 
 def _live_contract_preferred_start_date(symbol_dir: Path) -> pd.Timestamp:
-    policy_path = symbol_dir.parent / CONTRACT_SOURCE_POLICY_FILENAME
+    from comm_ls.commodity_paths import commodity_root_from_symbol
+    policy_path = commodity_root_from_symbol(symbol_dir) / CONTRACT_SOURCE_POLICY_FILENAME
     if not policy_path.exists():
         return DEFAULT_LIVE_CONTRACT_PREFERRED_START_DATE
 
@@ -428,8 +435,9 @@ def _prefer_contract_rows_by_cutover(
 
 
 def _load_contract_market_data(symbol_dir: Path) -> pd.DataFrame:
+    from comm_ls.commodity_paths import history_symbol_dir
     frames: list[pd.DataFrame] = []
-    for path in sorted(symbol_dir.glob("*.csv")):
+    for path in sorted(history_symbol_dir(symbol_dir).glob("*.csv")):
         contract = path.stem.upper()
         df = _read_contract_csv(path)
         normalized = _normalize_contract_market_data(df, contract=contract, source_priority=0)
@@ -796,9 +804,10 @@ def _load_contract_settles(
     contract_column: str = "calendar_dec_contract",
     settle_column: str = "calendar_dec_settle",
 ) -> pd.DataFrame:
+    from comm_ls.commodity_paths import history_symbol_dir
     frames: list[pd.DataFrame] = []
     for contract in sorted(contracts.dropna().astype(str).unique()):
-        path = symbol_dir / f"{contract}.csv"
+        path = history_symbol_dir(symbol_dir) / f"{contract}.csv"
         if not path.exists():
             continue
         # Historical files are not schema-uniform: some older contracts have

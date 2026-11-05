@@ -44,9 +44,11 @@ def load_cro_features(root):
     if late.any():
         raise ValueError('CRO crack arrival is after next-session open; review timestamp alignment')
     out = cro_signal(source.crack_03,calendar).to_frame('cro_state')
+    out['cro_state_v2'] = out['cro_state'] * .9
     # Fail closed on stale current source, rather than silently carrying a state.
     out = out.loc[out.index <= source.crack_03.last_valid_index()]
     out['__feature_observed__cro_state'] = True
+    out['__feature_observed__cro_state_v2'] = True
     return out
 
 

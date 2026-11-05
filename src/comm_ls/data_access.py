@@ -894,11 +894,12 @@ def get_commodity_contracts(
     """Return all local futures contract files for a commodity symbol.
 
     Example: `get_commodity_contracts("CL")` reads every CSV under
-    `data/comm/CL` and adds `symbol` plus `contract` columns.
+    `data/comm/raw_data/CL` and adds `symbol` plus `contract` columns.
     """
 
     symbol = symbol.upper()
-    directory = Path(commodity_dir) / symbol
+    from comm_ls.commodity_paths import history_symbol_dir
+    directory = history_symbol_dir(Path(commodity_dir) / symbol)
     if not directory.exists():
         raise FileNotFoundError(f"No local commodity directory found for {symbol}: {directory}")
 

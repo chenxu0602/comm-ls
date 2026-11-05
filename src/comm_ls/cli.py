@@ -153,6 +153,8 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     carry_data = subparsers.add_parser("build-carry-data")
+    carry_data.add_argument('--as-of', default=None,
+                            help='Optional inclusive source-date cutoff for carry construction')
     carry_data.add_argument("--commodity-dir", type=Path, default=Path("data/comm"))
     carry_data.add_argument(
         "--output-dir",
@@ -2154,12 +2156,13 @@ def main() -> None:
         return
 
     if args.command == "build-carry-data":
+        from comm_ls.commodity_paths import history_root
         if args.symbol:
             symbols = sorted({str(symbol).upper().strip() for symbol in args.symbol})
         else:
             symbols = sorted(
                 path.name.upper()
-                for path in args.commodity_dir.iterdir()
+                for path in history_root(args.commodity_dir).iterdir()
                 if path.is_dir()
                 and not path.name.lower().startswith("carry_data")
                 and path.name not in {"live_data", "LME"}
@@ -2197,6 +2200,7 @@ def main() -> None:
                 lis_ratio=args.lis_ratio,
                 activity_threshold=args.activity_threshold,
                 arrival_hour_utc=args.arrival_hour_utc,
+                as_of=args.as_of,
             )
             frame = build_carry_frame(config)
             output_path = write_carry_frame(

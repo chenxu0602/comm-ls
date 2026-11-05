@@ -14,10 +14,12 @@ from comm_ls.commodity import (
     FUTURES_MONTH_NUMBERS,
     LIVE_PRICE_SCALE_BY_SYMBOL,
     _live_contract_preferred_start_date,
+    _live_contract_market_data_path,
     _read_contract_csv,
     _resolve_contract_duplicates,
     _validate_live_contract_dates,
 )
+from comm_ls.china_futures import CHINA_ACTIVE_MONTHS, select_china_front
 
 
 DAYS_IN_YEAR = 365.25
@@ -74,6 +76,7 @@ class CarryBuildConfig:
     lis_ratio: float = 0.60
     activity_threshold: float = 0.005
     arrival_hour_utc: int = 8
+    as_of: str | None = None
 
     @property
     def normalized_symbol(self) -> str:
@@ -195,8 +198,9 @@ def _normalize_source_frame(
 
 
 def _load_source_frames(symbol: str, commodity_dir: Path) -> tuple[pd.DataFrame, pd.DataFrame]:
+    from comm_ls.commodity_paths import history_symbol_dir
     symbol = symbol.upper()
-    symbol_dir = commodity_dir / symbol
+    symbol_dir = history_symbol_dir(commodity_dir / symbol)
     history_frames: list[pd.DataFrame] = []
     if symbol_dir.exists():
         for path in sorted(symbol_dir.glob("*.csv")):
@@ -208,8 +212,7 @@ def _load_source_frames(symbol: str, commodity_dir: Path) -> tuple[pd.DataFrame,
             if not normalized.empty:
                 history_frames.append(normalized)
 
-    live_symbol = CARRY_OUTPUT_SYMBOL_BY_SOURCE.get(symbol, symbol)
-    live_path = commodity_dir / "live_data" / f"{live_symbol}.csv"
+    live_path = _live_contract_market_data_path(commodity_dir / symbol)
     if live_path.exists():
         live = _normalize_source_frame(
             _read_contract_csv(live_path),
@@ -375,6 +378,10 @@ def load_contract_panel(config: CarryBuildConfig) -> pd.DataFrame:
     """Load a timestamp-safe, field-level merged contract panel."""
     symbol = config.normalized_symbol
     history, live = _load_source_frames(symbol, config.commodity_dir)
+    if config.as_of is not None:
+        cutoff = pd.Timestamp(config.as_of).normalize()
+        history = history.loc[history.date.le(cutoff)] if not history.empty else history
+        live = live.loc[live.date.le(cutoff)] if not live.empty else live
     if history.empty and live.empty:
         raise FileNotFoundError(f"No contract data found for {symbol} under {config.commodity_dir}")
 
@@ -538,6 +545,10 @@ def contract_maturity(
     observed_history: pd.DataFrame | None = None,
 ) -> pd.Timestamp:
     """Return an approximate last-trade maturity without live-data lookahead."""
+    if symbol.upper() in CHINA_ACTIVE_MONTHS:
+        # Transparent delivery-month proxy for tenors, never future observed
+        # final quote dates or a fabricated exchange last-trading date.
+        return contract_month_start(contract)
     convention = _convention_maturity(contract, symbol)
     known_symbols = ENERGY_SYMBOLS | CRYPTO_SYMBOLS | {"GC", "SI", "HG", "PA", "PL"}
     if symbol.upper() in known_symbols or observed_history is None or observed_history.empty:
@@ -636,6 +647,8 @@ def _legacy_panel_for_carry(
 
 
 def _eligible_months(symbol: str) -> tuple[int, ...]:
+    if symbol.upper() in CHINA_ACTIVE_MONTHS:
+        return CHINA_ACTIVE_MONTHS[symbol.upper()]
     return ACTIVE_CONTRACT_MONTHS_BY_SYMBOL.get(symbol.upper(), ALL_CONTRACT_MONTHS)
 
 
@@ -695,6 +708,13 @@ def select_front_contracts(
     return_diagnostics: bool = False,
 ) -> pd.Series | tuple[pd.Series, pd.DataFrame]:
     """Select a no-lookahead, monotone front chain with roll hysteresis."""
+    if symbol.upper() in CHINA_ACTIVE_MONTHS:
+        if roll_policy != 'confirmed':
+            raise ValueError('China chains currently support confirmed policy only')
+        selected, diagnostics = select_china_front(panel,symbol=symbol.upper(),
+            confirmation_observations=confirmation_observations,
+            allowed_months=allowed_months,max_maturity_years=max_maturity_years)
+        return (selected,diagnostics) if return_diagnostics else selected
     if roll_policy not in {"confirmed", "adaptive-fast", "first-fresh-lead"}:
         raise ValueError(f"Unsupported roll_policy: {roll_policy!r}")
     allowed = set(allowed_months or _eligible_months(symbol))
@@ -1196,6 +1216,8 @@ def _annualized_carry(
 
 
 def _anchor_months(symbol: str) -> tuple[int, ...]:
+    if symbol.upper() in CHINA_ACTIVE_MONTHS:
+        return CHINA_ACTIVE_MONTHS[symbol.upper()]
     return ANCHOR_MONTHS_BY_SYMBOL.get(symbol.upper(), (3, 6, 9, 12))
 
 
@@ -1278,7 +1300,7 @@ def build_carry_frame(config: CarryBuildConfig) -> pd.DataFrame:
     # stricter, current LIS features above. The old carry writer used a
     # generic fifth-last-business-day maturity convention, per-contract
     # settlement/volume forward-fill, and volume-only activity selection.
-    legacy_panel = _legacy_panel_for_carry(
+    legacy_panel = panel if symbol in CHINA_ACTIVE_MONTHS else _legacy_panel_for_carry(
         panel,
         symbol=symbol,
         commodity_dir=config.commodity_dir,
@@ -1306,6 +1328,14 @@ def build_carry_frame(config: CarryBuildConfig) -> pd.DataFrame:
     )
     output = output.join(legacy)
     output["carry"] = output[legacy_label]
+    if symbol in CHINA_ACTIVE_MONTHS:
+        # No legacy China writer exists: use current activity-aware LIS carry.
+        label = f'lis_carry_{legacy_target:.2f}y'.replace('.', 'p')
+        output['carry'] = output[label]
+        output['maturity_basis'] = 'delivery_month_start_proxy'
+        output['roll_policy_family'] = 'china_dominant_45d'
+        output['price_currency'] = 'CNY'
+        # contango/backwardation remain the LIS curve-leg counts, not booleans.
 
     for far_leg, label in ((1, "front_second"), (2, "front_third"), (5, "front_sixth"), (11, "front_twelfth")):
         far = _extract_chain_fields(panel, chain_contracts[f"M{far_leg}_con"], prefix=f"X{far_leg}")
@@ -1445,6 +1475,9 @@ def build_carry_frame(config: CarryBuildConfig) -> pd.DataFrame:
 
 
 def write_carry_frame(frame: pd.DataFrame, output_path: Path, *, overwrite: bool = False) -> Path:
+    if not frame.empty and 'roll_policy_family' in frame and frame.roll_policy_family.eq('china_dominant_45d').any():
+        if output_path.parent.name != 'carry_data_2':
+            raise ValueError('China research chains must be written under carry_data_2, never carry_data')
     if output_path.exists() and not overwrite:
         raise FileExistsError(f"Refusing to overwrite existing carry file: {output_path}")
     output_path.parent.mkdir(parents=True, exist_ok=True)

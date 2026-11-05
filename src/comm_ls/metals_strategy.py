@@ -519,8 +519,10 @@ def build_hg_cl_ratio(
     *,
     allow_canonical_carry: bool = False,
 ) -> pd.DataFrame:
-    hg_dir = commodity_dir / "HG"
-    cl_dir = commodity_dir / "CL"
+    from comm_ls.commodity_paths import history_root
+    source_root = history_root(Path(commodity_dir))
+    hg_dir = source_root / "HG"
+    cl_dir = source_root / "CL"
     hg_data: dict[str, pd.DataFrame] = {}
     cl_data: dict[str, pd.DataFrame] = {}
     current_year = pd.Timestamp.today().year

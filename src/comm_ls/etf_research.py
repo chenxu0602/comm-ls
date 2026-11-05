@@ -494,14 +494,43 @@ def load_metal_pair_signals(sources, *, root=None, family='_2', start=None, end=
     return out.loc[start:end]
 
 
-def load_refinery_crack_data(*, root=None, start=None, end=None):
-    """Load canonical point-in-time crack signals with their availability timestamp."""
+def load_refinery_crack_data(*, root=None, start=None, end=None, quarterly_path=None,
+                             include_quarterly=False):
+    """Load unchanged June data, optionally joining isolated quarterly columns."""
     path = Path(root or project_root())/'data/processed/refinery_crack_signals.parquet'
     frame = pd.read_parquet(path)
     frame['date'] = pd.to_datetime(frame.date,errors='raise').dt.normalize()
     frame['arrival'] = pd.to_datetime(frame.arrival,errors='raise')
     if frame.date.duplicated().any():
         raise ValueError(f'Duplicate crack dates: {path}')
+    frame = frame.set_index('date').sort_index()
+    if include_quarterly:
+        if quarterly_path is not None:
+            raise ValueError('Use include_quarterly OR quarterly_path, not both')
+        quarterly_path = 'data/processed/refinery_crack_quarterly.parquet'
+    if quarterly_path is not None:
+        quarterly = load_refinery_crack_quarterly_data(path=quarterly_path,root=root)
+        if include_quarterly and quarterly.index.max() != frame.index.max():
+            raise ValueError('Quarterly/June cutoff mismatch; run rebuild_refinery_crack_cache.sh')
+        overlap = frame.columns.intersection(quarterly.columns)
+        if len(overlap):
+            raise ValueError(f'Quarterly columns must not replace June columns: {list(overlap)}')
+        frame = frame.join(quarterly,how='left')
+    return frame.loc[start:end]
+
+
+def load_refinery_crack_quarterly_data(*, path, root=None, start=None, end=None):
+    """Load a separately built quarterly snapshot; no implicit date/arrival shift."""
+    path = Path(path)
+    if not path.is_absolute():
+        path = Path(root or project_root())/path
+    frame = pd.read_csv(path) if path.suffix=='.csv' else pd.read_parquet(path)
+    frame['date'] = pd.to_datetime(frame.date,errors='raise').dt.normalize()
+    if frame.date.duplicated().any():
+        raise ValueError(f'Duplicate quarterly crack dates: {path}')
+    for column in ('quarterly_arrival','quarterly_source_arrival'):
+        if column in frame:
+            frame[column] = pd.to_datetime(frame[column],errors='raise')
     return frame.set_index('date').sort_index().loc[start:end]
 
 
