@@ -39,7 +39,7 @@ def refiner_slow_signal(carry, cl_m1_return, *, updated=False):
     return long.ffill().fillna(0.) + short.ffill().fillna(0.)
 
 
-def load_inputs(root, gate_symbol='CL'):
+def load_inputs(root, gate_symbol='CL', *, gate_family=''):
     root = Path(root)
     cache = pd.read_parquet(root/'data/cache/feature_return_observation_v1/HO-multi_return_2.parquet',
         columns=['date', 'ticker', HO_FEATURE, 'feature_alignment_mode', 'commodity_arrival'])
@@ -49,19 +49,23 @@ def load_inputs(root, gate_symbol='CL'):
         raise ValueError('Duplicate refiner_slow HO cache dates/tickers')
     if set(cache.feature_alignment_mode.dropna()) != {'stock_observation_asof'}:
         raise ValueError('refiner_slow requires HO _2 stock_observation_asof inputs')
-    cl = pd.read_csv(root/f'data/comm/carry_data/{gate_symbol}.csv',
+    if gate_family not in ('', '_2'):
+        raise ValueError('Invalid refiner_slow gate family')
+    cl = pd.read_csv(root/f'data/comm/carry_data{gate_family}/{gate_symbol}.csv',
                      usecols=['date', 'm0_ret', 'm1_ret', 'arrival'], parse_dates=['date'])
     if cl.date.duplicated().any():
         raise ValueError('Duplicate refiner_slow CL carry dates')
     return cache.sort_values('date'), cl.set_index('date').sort_index()
 
 
-def load_refiner_slow_features(root, *, updated=False, ho_gate=False):
-    cache, cl = load_inputs(root, gate_symbol='HO') if ho_gate else load_inputs(root)
+def load_refiner_slow_features(root, *, updated=False, ho_gate=False, merged_gate=False):
+    if merged_gate and not ho_gate:
+        raise ValueError('Merged slow gate requires HO')
+    cache, cl = load_inputs(root, gate_symbol='HO', gate_family='_2' if merged_gate else '') if ho_gate else load_inputs(root)
     carry = cache.loc[cache.ticker.eq('DINO')].set_index('date')[HO_FEATURE]
     if carry.empty:
         raise ValueError('Missing DINO HO feature history for refiner_slow')
-    feature = 'refiner_slow_state_v3' if ho_gate else ('refiner_slow_state_v2' if updated else 'refiner_slow_state')
+    feature = 'refiner_slow_state_v4' if merged_gate else ('refiner_slow_state_v3' if ho_gate else ('refiner_slow_state_v2' if updated else 'refiner_slow_state'))
     state = refiner_slow_signal(carry, cl.m1_ret if ho_gate else (cl.m0_ret if updated else cl.m1_ret),
                                 updated=updated or ho_gate).to_frame(feature)
     state['__feature_observed__' + feature] = True
@@ -73,7 +77,8 @@ def validate_live_inputs(root, as_of, target_date):
     day = pd.Timestamp(as_of).normalize()
     target = pd.Timestamp(target_date).normalize()
     ho_gate = target >= pd.Timestamp('2026-11-02')
-    cache, cl = load_inputs(root, gate_symbol='HO') if ho_gate else load_inputs(root)
+    merged_gate = target >= pd.Timestamp('2026-11-06')
+    cache, cl = load_inputs(root, gate_symbol='HO', gate_family='_2' if merged_gate else '') if ho_gate else load_inputs(root)
     updated = target >= pd.Timestamp('2026-10-28')
     return_column = 'm0_ret' if updated and not ho_gate else 'm1_ret'
     opening = target.tz_localize('America/New_York') + pd.Timedelta(hours=9, minutes=30)
@@ -88,8 +93,9 @@ def validate_live_inputs(root, as_of, target_date):
             raise ValueError(f'Incomplete refiner_slow HO decision lookback for {ticker} at {day.date()}')
         gate = cl.reindex(local.index).tail(20)
         if len(gate) != 20 or not np.isfinite(gate[return_column]).all():
-            raise ValueError(f'Incomplete refiner_slow CL {return_column} decision lookback for {ticker}')
-        for label, arrivals in [('HO', lookback.commodity_arrival), ('CL', gate.arrival)]:
+            bad = gate.index[~np.isfinite(gate[return_column])].strftime('%Y-%m-%d').tolist()
+            raise ValueError(f'Incomplete refiner_slow {"HO" if ho_gate else "CL"} {return_column} decision lookback for {ticker}: {bad}')
+        for label, arrivals in [('HO', lookback.commodity_arrival), ('HO' if ho_gate else 'CL', gate.arrival)]:
             known = pd.to_datetime(arrivals)
             if known.dt.tz is None:
                 known = known.dt.tz_localize('Asia/Hong_Kong')
@@ -98,6 +104,7 @@ def validate_live_inputs(root, as_of, target_date):
         state = refiner_slow_signal(local[HO_FEATURE], cl[return_column], updated=updated)
         rows.append(dict(instrument=ticker, as_of=day, target_date=target,
                          gate_symbol='HO' if ho_gate else 'CL',
+                         gate_family='_2' if merged_gate else '',
                          ho_carry=local[HO_FEATURE].iloc[-1],
                          cl_return_column=return_column,
                          cl_return=gate[return_column].iloc[-1], signal=state.iloc[-1]))

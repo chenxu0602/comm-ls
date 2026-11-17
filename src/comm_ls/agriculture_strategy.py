@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 import numpy as np
@@ -12,6 +12,8 @@ from comm_ls.etf_research import load_soybean_crush_data, rolling_betas
 ROOT = Path(".")
 AGRICULTURE_PRODUCTION_START_DATE = pd.Timestamp("2026-10-02")
 AGRICULTURE_PRODUCTION_AUM = 2_000.0
+ADM_TSN_DISTANCE_START_DATE = pd.Timestamp("2026-11-16")
+ADM_CRUSH_VOL3_START_DATE = pd.Timestamp("2026-11-16")
 DEFAULT_CACHE_PATH = (
     ROOT / "data/cache/feature_return_observation_v1/ZS-soybean-common_2.parquet"
 )
@@ -27,6 +29,7 @@ class AgricultureSleeve:
     primary: str = ""
     secondary: str = ""
     version: str = ""
+    basket: tuple[tuple[str, float], ...] = (("ADM", .60), ("BG", .40))
 
 
 AGRICULTURE_SLEEVES = {
@@ -87,7 +90,26 @@ AGRICULTURE_SLEEVES = {
 }
 
 
-def sleeve_config_frame() -> pd.DataFrame:
+def agriculture_config_for_target(target_date):
+    """Dated operator allocation; never rewrite discovery/backtest defaults."""
+    config = dict(AGRICULTURE_SLEEVES)
+    if target_date is not None and pd.Timestamp(target_date) >= pd.Timestamp('2026-11-10'):
+        weights = dict(crush_vol=.25, crush_vol2=.25, adm_bg=0., adm_bg2=0.,
+                       adm_tsn=.15, bg_tsn=0.)
+        config = {name: replace(sleeve, weight=weights.get(name, sleeve.weight))
+                  for name, sleeve in config.items()}
+    if target_date is not None and pd.Timestamp(target_date) >= ADM_TSN_DISTANCE_START_DATE:
+        config['adm_tsn'] = replace(config['adm_tsn'], kind='adm_tsn_distance', weight=.25)
+    if target_date is not None and pd.Timestamp(target_date) >= ADM_CRUSH_VOL3_START_DATE:
+        config['crush_vol2'] = replace(config['crush_vol2'], basket=(("ADM", .70), ("BG", .30)))
+        config['crush_vol3'] = AgricultureSleeve(
+            .25, 'adm_crush_constrained', 'adjusted_zs',
+            'residual_return_mktsec_narrow_w12m', 25., primary='ADM',
+        )
+    return config
+
+
+def sleeve_config_frame(target_date=None) -> pd.DataFrame:
     return pd.DataFrame(
         [
             {
@@ -96,7 +118,7 @@ def sleeve_config_frame() -> pd.DataFrame:
                 "slippage_bps": sleeve.slippage_bps,
                 "return_method": sleeve.return_method,
             }
-            for name, sleeve in AGRICULTURE_SLEEVES.items()
+            for name, sleeve in agriculture_config_for_target(target_date).items()
         ]
     )
 
@@ -157,6 +179,52 @@ def _target_from_signal(signal: pd.Series, *, as_of: pd.Timestamp) -> tuple[floa
     return float(eligible.iloc[-1]), pd.Timestamp(eligible.index[-1]).normalize()
 
 
+def _adm_tsn_distance_signal(crush, adm_prices, tsn_prices):
+    """Notebook calc_adm_tsn: ADM calendar, price-distance entry gate, equal legs."""
+    value = pd.to_numeric(crush, errors="coerce").reindex(adm_prices.index)
+    distance = adm_prices - tsn_prices.reindex(adm_prices.index)
+    distance_sd = distance.rolling(252 * 5, min_periods=252).std()
+    scale = value.rolling(252 * 3, min_periods=252).std()
+    change_long = value.diff(20)
+    change_tiny = value.diff(5)
+    long_state = pd.Series(np.nan, index=value.index, dtype=float)
+    short_state = long_state.copy()
+    long_state.loc[(change_long > scale) & (distance < distance_sd)] = 1.0
+    long_state.loc[change_tiny < -scale / 2] = 0.0
+    short_state.loc[(change_long < -scale) & (distance > -distance_sd)] = -1.0
+    short_state.loc[change_tiny > scale / 2] = 0.0
+    return long_state.ffill().fillna(0.0) + short_state.ffill().fillna(0.0)
+
+
+def _adm_crush_constrained_inputs(crush, prices):
+    """Keep notebook order: compute crush volatility BEFORE stock alignment."""
+    crush = pd.to_numeric(crush, errors="coerce")
+    price = pd.to_numeric(prices, errors="coerce")
+    value = crush.reindex(price.index)
+    volatility = crush.rolling(10, min_periods=5).std().reindex(price.index)
+    return pd.DataFrame({
+        "vol_change": volatility.diff(10),
+        "crush_change": value.diff(5),
+        "price": price,
+        "ma50": price.rolling(50, min_periods=25).mean(),
+    }, index=price.index)
+
+
+def _adm_crush_constrained_signal(crush, prices):
+    """Notebook calc_crush_vol(constraint=True), unit ADM leg, no smoothing."""
+    values = _adm_crush_constrained_inputs(crush, prices)
+    vol_change, change = values.vol_change, values.crush_change
+    long_state = pd.Series(np.nan, index=prices.index, dtype=float)
+    short_state = long_state.copy()
+    long_state.loc[(vol_change > .05) & (change > .10)
+                   & (values.price < values.ma50)] = 1.
+    long_state.loc[vol_change < -.05/2] = 0.
+    short_state.loc[(vol_change < -.05) & (change < -.10)
+                    & (values.price > values.ma50)] = -1.
+    short_state.loc[(vol_change > .05/2) | (change > .10/2)] = 0.
+    return long_state.ffill().fillna(0.) + short_state.ffill().fillna(0.)
+
+
 def _validate_live_crush_inputs(value, index, *, component, field, version, as_of):
     """Require the actual field and its decision lookbacks, even for a flat state."""
     index = index[index <= as_of]
@@ -183,13 +251,14 @@ def build_component_targets(
     root: Path = ROOT,
     family: str = "_2",
 ) -> tuple[pd.DataFrame, dict[str, pd.Timestamp], dict[str, Path]]:
-    """Reproduce the six executed notebook sleeves without running the notebook."""
+    """Reproduce effective-dated notebook sleeves without executing the notebook."""
     as_of = pd.Timestamp(as_of).normalize()
     target_date = pd.Timestamp(target_date).normalize()
     if target_date <= as_of:
         raise ValueError("target_date must be after as_of")
+    config = agriculture_config_for_target(target_date)
     crush = load_soybean_crush_data(root=root, family=family).loc[:as_of]
-    required_fields = {sleeve.field for sleeve in AGRICULTURE_SLEEVES.values()}
+    required_fields = {sleeve.field for sleeve in config.values() if sleeve.weight != 0}
     missing = required_fields.difference(crush.columns)
     if missing:
         raise KeyError(f"Soybean crush data is missing fields: {sorted(missing)}")
@@ -206,10 +275,37 @@ def build_component_targets(
         return stock_cache[key]
 
     rows: list[dict[str, object]] = []
-    for component, sleeve in AGRICULTURE_SLEEVES.items():
+    for component, sleeve in config.items():
+        if sleeve.weight == 0:
+            # Preserve zero component rows and the clearing universe, without
+            # requiring a suspended pair's signal or rolling trading beta.
+            tickers = ('ADM','BG') if sleeve.kind == 'crush_vol' else (sleeve.primary,sleeve.secondary)
+            for ticker in tickers:
+                rows.append(dict(target_date=target_date, component=component,
+                                 instrument=ticker, research_target_weight=0.,
+                                 signal_date=as_of, field=sleeve.field))
+            continue
         crush_series = pd.to_numeric(crush[sleeve.field], errors="coerce")
+        if sleeve.kind == "adm_crush_constrained":
+            frame = stock(sleeve.primary, sleeve.return_method)
+            _validate_live_crush_inputs(
+                crush_series, frame.index, component=component,
+                field=sleeve.field, version="crush_vol", as_of=as_of,
+            )
+            prices = _load_stock(cache_path, sleeve.primary, ["adj_close"]).loc[:as_of, "adj_close"].reindex(frame.index)
+            inputs = _adm_crush_constrained_inputs(crush_series, prices)
+            if (not np.isfinite(inputs.iloc[-1].astype(float)).all()
+                    or inputs.price.iloc[-1] <= 0):
+                raise ValueError(f"{component}: missing current ADM adjusted price/MA50/crush inputs on {as_of.date()}")
+            signal = _adm_crush_constrained_signal(crush_series, prices)
+            target, signal_date = _target_from_signal(signal, as_of=as_of)
+            rows.append(dict(target_date=target_date, component=component,
+                             instrument=sleeve.primary,
+                             research_target_weight=target*sleeve.weight,
+                             signal_date=signal_date, field=sleeve.field))
+            continue
         if sleeve.kind == "crush_vol":
-            for ticker, basket_weight in {"ADM": 0.60, "BG": 0.40}.items():
+            for ticker, basket_weight in sleeve.basket:
                 frame = stock(ticker, sleeve.return_method)
                 _validate_live_crush_inputs(
                     crush_series, frame.index, component=component,
@@ -231,6 +327,34 @@ def build_component_targets(
                         "field": sleeve.field,
                     }
                 )
+            continue
+
+        if sleeve.kind == "adm_tsn_distance":
+            primary = stock(sleeve.primary, sleeve.return_method)
+            secondary = stock(sleeve.secondary, sleeve.return_method)
+            _validate_live_crush_inputs(
+                crush_series, primary.index, component=component,
+                field=sleeve.field, version=sleeve.version, as_of=as_of,
+            )
+            prices = {
+                ticker: _load_stock(cache_path, ticker, ["adj_close"]).loc[:as_of, "adj_close"]
+                for ticker in (sleeve.primary, sleeve.secondary)
+            }
+            aligned_prices = pd.concat(prices, axis=1).reindex(primary.index)
+            if not np.isfinite(aligned_prices.iloc[-1].astype(float)).all():
+                raise ValueError(f"Missing current ADM/TSN adjusted prices on {as_of.date()}")
+            distance = aligned_prices[sleeve.primary] - aligned_prices[sleeve.secondary]
+            if not np.isfinite(distance.rolling(252 * 5, min_periods=252).std().iloc[-1]):
+                raise ValueError("Insufficient ADM/TSN price-distance history: requires 252 joint observations")
+            base = _adm_tsn_distance_signal(
+                crush_series, prices[sleeve.primary].reindex(primary.index), prices[sleeve.secondary]
+            )
+            # Exactly equal and opposite dollar weights; no ADM/TSN rolling pair beta.
+            for ticker, side in ((sleeve.primary, 1.0), (sleeve.secondary, -1.0)):
+                target, signal_date = _target_from_signal(base * side, as_of=as_of)
+                rows.append(dict(target_date=target_date, component=component,
+                                 instrument=ticker, research_target_weight=target * sleeve.weight,
+                                 signal_date=signal_date, field=sleeve.field))
             continue
 
         primary = stock(sleeve.primary, sleeve.return_method)

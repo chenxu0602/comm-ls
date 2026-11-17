@@ -6,6 +6,8 @@ def strategy_notes(target_date, *, cro_enabled=False, agri_aum=None,
                    cro_active=None, agri_active=None):
     day = pd.Timestamp(target_date)
     lines = ['## Strategy changes and allocation notes', '']
+    if day >= pd.Timestamp('2026-11-16'):
+        lines.append('- Metals reweight from target2026-11-16: hg_gc_gap15/accel20/SCO-vol25/copper15/miners25%; alloys0 and notebook-only hg_gc_gap_gc_carry_iron_2=0. Nominal100%, no normalization; copper10->15 uses the previously idle5pp. AUM5000, legacy DAILY SPY+XME hedges, signal rules,12% name cap and execution controls unchanged. See docs/metals_reweight_2026-11-16.md.')
     if day >= pd.Timestamp('2026-10-23'):
         lines += [
             '- CL operator risk reduction effective target session 2026-10-23: chemical allocation reduced from 28% to 14%; psx_ref allocation reduced from 5% to 0% (suspended). At that decision, released 19 percentage points remained cash; no renormalization. Later dated decisions below supersede allocation details.',
@@ -32,21 +34,34 @@ def strategy_notes(target_date, *, cro_enabled=False, agri_aum=None,
     if agri_aum is not None and day >= pd.Timestamp('2026-10-02'):
         lines += [
             f'- Agriculture v4.3 joined the main account effective 2026-10-02: ${agri_aum:,.0f} allocated AUM. Idle allocation remains cash and still counts in account AUM.',
-            '- Agriculture uses component-specific hedges: crush_vol/crush_vol2/adm_bg2 use SPY + MOO; adm_bg/adm_tsn/bg_tsn use SPY only. Keep its virtual book separate.',
+            '- Agriculture uses component-specific hedges: narrow-sector residual sleeves use SPY + MOO for ADM/BG; adm_bg/adm_tsn/bg_tsn use SPY only. Keep its virtual book separate.',
         ]
         if agri_active is not None:
             lines.append(f"- Agriculture stock target state for this package: {'active' if agri_active else 'flat'}. This is not a permanent suspension.")
+        if day >= pd.Timestamp('2026-11-16'):
+            lines.append('- Agriculture notebook basket weights: crush_vol ADM60/BG40; crush_vol2 ADM70/BG30; crush_vol3 ADM100; adm_tsn equal/opposite ADM/TSN. Each sleeve allocation25%, no extra normalization.')
+            lines.append('- ADM/TSN rule and allocation sync from 2026-11-16: crush_02 momentum with ADM-minus-TSN adjusted-price distance entry gates; equal/opposite dollar legs, no rolling pair-beta sizing. Operator allocation25% (previously15%); crush_vol25/crush_vol2 25%/ADM-only crush_vol3 25%, adm_bg/adm_bg2/bg_tsn0. Nominal100%, no normalization; AUM2000 unchanged. crush_vol3 uses adjusted_zs volatility with MA50 entry constraints and SPY + MOO explicit hedges. See docs/agri_crush_vol3_sync_2026-11-16.md.')
     if pd.Timestamp('2026-11-02') <= day < pd.Timestamp('2026-11-04'):
         lines += [
             '- CURRENT CL from 2026-11-02: chemical 0% (25% research dummy is NOT live), shipping 20%, refiner 3%, refiner_slow/re_slow 10%, services 20%, bwt 2%, re_c03 20%, others including CRO 0%. Budget 75%; no renormalization; all book AUMs unchanged.',
             '- re_c03 replaces CRO: DINO/MPC/VLO 20/30/50%, full balance, quarterly near MA3-MA30 entry, far change5 exit, far std30 thresholds. SPY + XLE legacy DAILY hedges; old CRO half-balance/SPY-only retired.',
             '- Refiner DK/DINO/PBF 30/40/30%; slow DK/DINO/PBF 40/30/30%, HO m1 momentum gate and carry ffill.diff50. Other algorithms unchanged. Track allocation/hedge migration separately. See docs/cl_reallocation_2026-11-02.md.',
         ]
-    if day >= pd.Timestamp('2026-11-04'):
+    if pd.Timestamp('2026-11-04') <= day < pd.Timestamp('2026-11-06'):
         lines += [
             '- CURRENT CL from 2026-11-04: chemical20/shipping20/refiner3/refiner_slow8/services20/bwt2/CRO20/re_c03 10%; nominal budget103%, no renormalization. AUM and legacy DAILY beta unchanged.',
             '- CRO restored alongside re_c03, not CRP: VLO/MPC/PSX/PBF=30/20/20/20%, basket total90%, half-balance, SPY-only. Idle basket capacity is preserved. re_c03 retains SPY+XLE hedging.',
             '- Chemical re-enabled by operator: DOW/LYB/WLK/CE 30/30/10/30%, CL carry entry, L and PP own-vol exits, hold2, SPY+XLE. Current flat signal is not a permanent pause; future signals may open positions. See docs/cl_chemical_lp_2026-11-04.md.',
+        ]
+    if pd.Timestamp('2026-11-06') <= day < pd.Timestamp('2026-11-09'):
+        lines += [
+            '- CURRENT CL from 2026-11-06: shipping20->10% operator risk reduction; chemical20/refiner3/refiner_slow8/services20/bwt2/CRO20/re_c03 10% unchanged. Nominal budget93%, no normalization; released10 percentage points stay cash. No automatic shipping restoration.',
+            '- Operator corrected notebook: chemical retains hold2 (NOT direct signal, NOT hold21). Slow HO m1 gate reads carry_data_2 from Nov06 to match notebook default loader, with strict lookback/arrival validation, no canonical fallback. L/PP exits and baskets unchanged. CRO remains half-balance SPY-only; re_c03 SPY+XLE. AUM and legacy DAILY beta unchanged. See docs/cl_shipping_reduction_2026-11-06.md.',
+        ]
+    if day >= pd.Timestamp('2026-11-09'):
+        lines += [
+            '- CURRENT FINAL CL from 2026-11-09: operator chemical20->15%, services20->10%, shipping STAYS10% (initial20% package superseded before execution); refiner3/slow8/bwt2/CRO20/re_c03 10% unchanged. Nominal budget78%, no normalization. AUM and legacy DAILY beta unchanged.',
+            '- Rules unchanged: chemical hold2 and L/PP exits; slow HO m1 gate carry_data_2; CRO half-balance SPY-only, re_c03 SPY+XLE. Track allocation migration separately from signal changes. See docs/cl_reweight_2026-11-09.md.',
         ]
     if cro_enabled and pd.Timestamp('2026-10-06') <= day < pd.Timestamp('2026-11-02'):
         lines += [

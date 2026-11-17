@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Mapping
 
@@ -158,10 +158,22 @@ def _load_hg_power_driver(
     return out.set_index("date").sort_index()
 
 
-def validate_config() -> None:
-    if not np.isclose(sum(cfg.weight for cfg in CRYPTO_SLEEVE_CONFIG.values()), 1.0):
-        raise ValueError("Crypto sleeve weights must sum to 1")
-    for name, cfg in CRYPTO_SLEEVE_CONFIG.items():
+def crypto_config_for_target(target_date):
+    """Dated operator allocation; preserve pre-cutover and research defaults."""
+    config = dict(CRYPTO_SLEEVE_CONFIG)
+    if pd.Timestamp(target_date) >= pd.Timestamp('2026-11-11'):
+        config['platforms'] = replace(config['platforms'], weight=.10)
+    return config
+
+
+def validate_config(config=None) -> None:
+    config = CRYPTO_SLEEVE_CONFIG if config is None else config
+    total = sum(cfg.weight for cfg in config.values())
+    if not np.isfinite(total) or not 0 < total <= 1.0 + 1e-12:
+        raise ValueError("Crypto sleeve weights must have a total in (0, 1]; unused budget stays cash")
+    for name, cfg in config.items():
+        if not np.isfinite(cfg.weight) or cfg.weight < 0:
+            raise ValueError(f'{name}: invalid weight')
         if set(cfg.tickers) != set(cfg.internal_weights):
             raise ValueError(f"{name}: internal weights do not match tickers")
         if not np.isclose(sum(cfg.internal_weights.values()), 1.0):
@@ -273,14 +285,15 @@ def build_component_targets(
     commodity_signals_path: Path = CRYPTO_COMMODITY_SIGNALS_PATH,
 ) -> tuple[pd.DataFrame, dict[str, pd.Timestamp], dict[str, Path]]:
     """Build next-session component weights using the notebook's one-session delay."""
-    validate_config()
     as_of = pd.Timestamp(as_of).normalize()
     target_date = pd.Timestamp(target_date).normalize()
+    config = crypto_config_for_target(target_date)
+    validate_config(config)
     rows: list[dict[str, object]] = []
     latest_dates: dict[str, pd.Timestamp] = {}
     source_paths: dict[str, Path] = {}
 
-    for sleeve, cfg in CRYPTO_SLEEVE_CONFIG.items():
+    for sleeve, cfg in config.items():
         path = cache_path(cfg.symbol, cache_dir)
         if not path.exists():
             raise FileNotFoundError(path)

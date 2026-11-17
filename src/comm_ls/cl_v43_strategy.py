@@ -71,4 +71,11 @@ def live_config_for_target(config, target_date):
         out['cro'] = replace(CRO_CONFIG, weight=.20, feature='cro_state_v2',
             internal_weights={'VLO': 1/3, 'MPC': 2/9, 'PSX': 2/9, 'PBF': 2/9},
             tickers=('VLO', 'MPC', 'PSX', 'PBF'))
+    if pd.Timestamp(target_date) >= pd.Timestamp('2026-11-06'):
+        # Operator drawdown risk override; released capacity is not reallocated.
+        out['shipping'] = replace(out['shipping'], weight=.10)
+        out['refiner_slow'] = replace(out['refiner_slow'], feature='refiner_slow_state_v4')
+    if pd.Timestamp(target_date) >= pd.Timestamp('2026-11-09'):
+        for name, weight in {'chemical':.15, 'shipping':.10, 'services':.10}.items():
+            out[name] = replace(out[name], weight=weight)
     return out

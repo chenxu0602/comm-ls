@@ -13,6 +13,7 @@ from comm_ls.live_allocation_policy import ALLOCATION_EFFECTIVE_DATE
 
 
 METALS_MAX_SINGLE_NAME_WEIGHT = 0.12
+METALS_REWEIGHT_NOV16 = pd.Timestamp("2026-11-16")
 METALS_FEATURE_ALIGNMENT_MODE = "stock_observation_asof"
 METALS_CACHE_PATH = Path("data/cache/feature_return_observation_v1/METALS-multi_return_2.parquet")
 GC_CACHE_PATH = Path("data/cache/feature_return_observation_v1/GC-multi_return_2.parquet")
@@ -161,7 +162,16 @@ METALS_SLEEVE_CONFIG: dict[str, MetalsSleeveConfig] = {
 
 def metals_config_for_target(target_date):
     """Preserve earlier session weights when regenerating historical packages."""
-    if pd.Timestamp(target_date).normalize() >= ALLOCATION_EFFECTIVE_DATE:
+    day = pd.Timestamp(target_date).normalize()
+    if day >= METALS_REWEIGHT_NOV16:
+        weights = dict(hg_gc_gap_gc_carry_iron=.15, sco_vol_gc_hg_accel_miners=.20,
+                       sco_specialty_alloys=0., sco_vol_miners=.25,
+                       copper_miner=.15, miners=.25)
+        # The notebook-only hg_gc_gap_gc_carry_iron_2 remains disabled at0;
+        # do not add an unapproved signal implementation to production.
+        return {name: replace(cfg, weight=weights[name])
+                for name, cfg in METALS_SLEEVE_CONFIG.items()}
+    if day >= ALLOCATION_EFFECTIVE_DATE:
         return METALS_SLEEVE_CONFIG
     previous = {"hg_gc_gap_gc_carry_iron": .20,
                 "sco_vol_gc_hg_accel_miners": .25, "sco_vol_miners": .15}
