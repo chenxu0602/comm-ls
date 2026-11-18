@@ -6,7 +6,11 @@ def strategy_notes(target_date, *, cro_enabled=False, agri_aum=None,
                    cro_active=None, agri_active=None):
     day = pd.Timestamp(target_date)
     lines = ['## Strategy changes and allocation notes', '']
-    if day >= pd.Timestamp('2026-11-16'):
+    if day >= pd.Timestamp('2026-11-18'):
+        lines.append('- SCO-vol miners rule sync from target2026-11-18: ATR14 below current-inclusive504/min252 q80, ATR diff20 positive, and m0_ret rolling10/min5 sum < -M0_ret_std_20 (no annualization or sqrt10). BHP/RIO/VALE/SCCO40/30/0/30; executed fixed hold2 overrides notebook config hold3. Sleeve allocation remains12.5% after Metals risk reduction; legacy SPY/XME unchanged. See docs/metals_sco_vol_sync_2026-11-18.md.')
+    if day >= pd.Timestamp('2026-11-17'):
+        lines.append('- Metals operator risk reduction from target2026-11-17: gap7.5/accel10/SCO-vol12.5/copper7.5/miners12.5%; all other sleeves0. Each Nov16 sleeve allocation halved before the unchanged12% name cap; nominal50%, released50% stays cash, no normalization or automatic restoration. AUM5000, signal rules, legacy DAILY SPY+XME hedges and execution controls unchanged. Recompute hedges from reduced stock targets and distinguish allocation migration from signal turnover. See docs/metals_risk_reduction_2026-11-17.md.')
+    elif day >= pd.Timestamp('2026-11-16'):
         lines.append('- Metals reweight from target2026-11-16: hg_gc_gap15/accel20/SCO-vol25/copper15/miners25%; alloys0 and notebook-only hg_gc_gap_gc_carry_iron_2=0. Nominal100%, no normalization; copper10->15 uses the previously idle5pp. AUM5000, legacy DAILY SPY+XME hedges, signal rules,12% name cap and execution controls unchanged. See docs/metals_reweight_2026-11-16.md.')
     if day >= pd.Timestamp('2026-10-23'):
         lines += [

@@ -26,6 +26,7 @@ CALENDAR_MONTH_CODES = {
     1: "F", 2: "G", 3: "H", 4: "J", 5: "K", 6: "M",
     7: "N", 8: "Q", 9: "U", 10: "V", 11: "X", 12: "Z",
 }
+CALENDAR_MONTH_CODES_INV = {code: month for month, code in CALENDAR_MONTH_CODES.items()}
 
 
 def soybean_crush_usd_per_bushel(
@@ -83,7 +84,8 @@ def build_seasonality_adjusted_soybean_crush(
         return soybean_crush_usd_per_bushel(joined["ZS"], joined["ZM"], joined["ZL"])
 
     first_year = min(index.year.min(), earliest_contract_year) if len(index) else earliest_contract_year
-    last_year = index.year.max() if len(index) else earliest_contract_year
+    # A late-year expired pair can advance into next January.
+    last_year = index.year.max() + 1 if len(index) else earliest_contract_year
     raw_paths: dict[tuple[int, str], pd.Series] = {}
     smooth_paths: dict[tuple[int, str], pd.Series] = {}
     for year in range(max(first_year, earliest_contract_year), last_year + 1):
@@ -107,6 +109,26 @@ def build_seasonality_adjusted_soybean_crush(
             and current_code == SEASONAL_CRUSH_MONTHS[position]
             else SEASONAL_CRUSH_MONTHS[position]
         )
+        # Fixed late-year pairing uses November soybeans for December meal/oil.
+        # All three CBOT legs terminate before the 15th of delivery month.
+        # On source business-date rows, a leg in a month whose 15th has arrived
+        # is expired. Advance the WHOLE group, never based on quote availability
+        # or the last row of a mutable history file. Ordinary missing quotes stay
+        # missing. This also correctly wraps December's next group into January.
+        position = SEASONAL_CRUSH_MONTHS.index(expiry_code)
+        if expiry_code == 'F' and date.month == 12:
+            year += 1
+        original_contract = f"{year}{expiry_code}"
+        while True:
+            leg_months = [CALENDAR_MONTH_CODES_INV[SEASONAL_CRUSH_LEG_MONTHS[s][position]]
+                          for s in SOYBEAN_COMPLEX_SYMBOLS]
+            if date < pd.Timestamp(year, min(leg_months), 15):
+                break
+            position = (position + 1) % len(SEASONAL_CRUSH_MONTHS)
+            if position == 0:
+                year += 1
+            expiry_code = SEASONAL_CRUSH_MONTHS[position]
+        year_offset = year - date.year
         current = raw_paths.get((year, expiry_code))
         raw_value = current.get(date, np.nan) if current is not None else np.nan
         historical = []
@@ -117,7 +139,7 @@ def build_seasonality_adjusted_soybean_crush(
             path = smooth_paths.get((prior_year, expiry_code))
             if path is None:
                 continue
-            comparison_date = pd.Timestamp(prior_year, date.month, comparison_day)
+            comparison_date = pd.Timestamp(prior_year - year_offset, date.month, comparison_day)
             available = path.loc[path.index >= comparison_date]
             if not available.empty:
                 historical.append(float(available.iloc[0]))
@@ -125,6 +147,11 @@ def build_seasonality_adjusted_soybean_crush(
         rows.append({
             "date": date,
             "seasonal_crush_contract": f"{year}{expiry_code}",
+            "seasonal_crush_original_contract": original_contract,
+            "seasonal_crush_expiry_roll": original_contract != f"{year}{expiry_code}",
+            **{f"seasonal_crush_contract_{s.lower()}":
+               f"{year}{SEASONAL_CRUSH_LEG_MONTHS[s][position]}"
+               for s in SOYBEAN_COMPLEX_SYMBOLS},
             "raw": raw_value,
             "median": median,
             "adjusted": raw_value - median,

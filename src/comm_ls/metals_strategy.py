@@ -167,10 +167,20 @@ def metals_config_for_target(target_date):
         weights = dict(hg_gc_gap_gc_carry_iron=.15, sco_vol_gc_hg_accel_miners=.20,
                        sco_specialty_alloys=0., sco_vol_miners=.25,
                        copper_miner=.15, miners=.25)
+        if day >= pd.Timestamp("2026-11-17"):
+            weights = {name: weight * .5 for name, weight in weights.items()}
         # The notebook-only hg_gc_gap_gc_carry_iron_2 remains disabled at0;
         # do not add an unapproved signal implementation to production.
-        return {name: replace(cfg, weight=weights[name])
-                for name, cfg in METALS_SLEEVE_CONFIG.items()}
+        config = {name: replace(cfg, weight=weights[name])
+                  for name, cfg in METALS_SLEEVE_CONFIG.items()}
+        if day >= pd.Timestamp("2026-11-18"):
+            cfg = config["sco_vol_miners"]
+            config["sco_vol_miners"] = replace(
+                cfg, internal_weights={"BHP": .4, "RIO": .3, "VALE": 0., "SCCO": .3},
+                hold_days=2, params={**cfg.params, "threshold": .80,
+                    "vol_quantile_shift": 0, "use_return_filter": 1,
+                    "return_window": 10, "return_min_periods": 5})
+        return config
     if day >= ALLOCATION_EFFECTIVE_DATE:
         return METALS_SLEEVE_CONFIG
     previous = {"hg_gc_gap_gc_carry_iron": .20,
@@ -195,8 +205,9 @@ def normalize_index(index: pd.Index) -> pd.DatetimeIndex:
 
 
 def validate_config(config: Mapping[str, MetalsSleeveConfig] = METALS_SLEEVE_CONFIG) -> None:
-    if not np.isclose(sum(cfg.weight for cfg in config.values()), 1.0):
-        raise ValueError("Metals sleeve weights must sum to 1")
+    weights = [cfg.weight for cfg in config.values()]
+    if any(not np.isfinite(w) or w < 0 for w in weights) or sum(weights) > 1.0 + 1e-12:
+        raise ValueError("Metals sleeve weights must be finite, nonnegative and sum to at most 1; unused capacity stays cash")
     for sleeve, cfg in config.items():
         if set(cfg.tickers) != set(cfg.internal_weights):
             raise ValueError(f"{sleeve} internal weights do not match tickers")
@@ -364,6 +375,9 @@ def sco_vol_accel_hysteresis(
 def sco_vol_regime_pulse(
     sco_vol: pd.Series,
     params: Mapping[str, float | int | str],
+    *,
+    sco_return: pd.Series | None = None,
+    sco_return_std: pd.Series | None = None,
 ) -> tuple[pd.Series, pd.DataFrame]:
     """Build the notebook's low-level, rising-volatility SCO entry pulse."""
     vol = pd.to_numeric(sco_vol, errors="coerce").ffill().sort_index()
@@ -372,12 +386,21 @@ def sco_vol_regime_pulse(
     state["vol_quantile"] = vol.rolling(
         int(params["vol_quantile_window"]),
         min_periods=int(params["vol_quantile_min_periods"]),
-    ).quantile(float(params["threshold"])).shift(1)
+    ).quantile(float(params["threshold"])).shift(int(params.get("vol_quantile_shift", 1)))
     state["vol_diff"] = vol.diff(int(params["vol_diff_days"]))
-    state["signal"] = (
+    entry = (
         (state["sco_vol"] < state["vol_quantile"])
         & (state["vol_diff"] > 0.0)
-    ).astype(float) * float(params["side_mult"])
+    )
+    if params.get("use_return_filter", 0):
+        if sco_return is None or sco_return_std is None:
+            raise ValueError("SCO return filter requires m0_ret and M0_ret_std_20")
+        state["sco_return_sum"] = pd.to_numeric(sco_return, errors="coerce").reindex(vol.index).rolling(
+            int(params["return_window"]), min_periods=int(params["return_min_periods"])
+        ).sum()
+        state["sco_return_cutoff"] = -pd.to_numeric(sco_return_std, errors="coerce").reindex(vol.index)
+        entry &= state["sco_return_sum"] < state["sco_return_cutoff"]
+    state["signal"] = entry.astype(float) * float(params["side_mult"])
     return state["signal"], state
 
 
@@ -681,6 +704,8 @@ def load_signal_bundle(
     sco_columns = list(
         dict.fromkeys(["date", SCO_CURVE_VOL_FEATURE, SCO_PULSE_VOL_FEATURE])
     )
+    if config["sco_vol_miners"].params.get("use_return_filter", 0):
+        sco_columns += ["m0_ret", "M0_ret_std_20"]
     sco_carry = pd.read_csv(sco_carry_path, usecols=sco_columns)
     sco_carry["date"] = pd.to_datetime(sco_carry["date"], errors="coerce")
     for column in dict.fromkeys((SCO_CURVE_VOL_FEATURE, SCO_PULSE_VOL_FEATURE)):
@@ -717,6 +742,8 @@ def load_signal_bundle(
     pulse_signal, pulse_diag = sco_vol_regime_pulse(
         sco_pulse_vol,
         pulse_cfg.params,
+        sco_return=sco_carry.get("m0_ret"),
+        sco_return_std=sco_carry.get("M0_ret_std_20"),
     )
     miner_cfg = config["miners"]
     miner_signal, miner_diag = persistent_binary(
